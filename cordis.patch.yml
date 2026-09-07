@@ -1,0 +1,14 @@
+# dsh-zhipu-toolkit layers.
+# Host half: dual-endpoint Zhipu BigModel GLM provider catalog (one billing
+# channel served at a time; default: Coding Plan).
+# Client half (dsh.client): settings card for endpoint/keys/tiers.
+- insert:
+    - id: dsh-zhipu-toolkit
+      name: dsh-zhipu-toolkit
+      config:
+        endpoints: coding
+        codingApiKeyEnv: BIGMODEL_API_KEY
+        paasApiKeyEnv: ZHIPU_API_KEY
+        codingBaseURL: https://open.bigmodel.cn/api/coding/paas/v4
+        paasBaseURL: https://open.bigmodel.cn/api/paas/v4
+        displayName: BigModel
