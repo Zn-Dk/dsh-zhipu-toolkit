@@ -329,6 +329,13 @@ export function apply(ctx: Context, rawConfig: ConfigType): void {
     // usually ready, so the panel reads instantly instead of waiting on a
     // cold ~30s scan. Failures stay silent — the card degrades to its
     // loading/empty state and the next RPC attempt retries anyway.
+  // Deferred prescan: warming the usage cache is pure host-side bookkeeping and
+  // must not compete with boot-critical work (plugin assembly, tsx transpile).
+  // 60s settle delay keeps the event loop responsive during startup; the scan
+  // itself stays fire-and-forget with silent failure and incremental caching.
+  const prescanTimer = setTimeout(() => {
     void computeUsageStats().catch(() => undefined)
+  }, 60_000)
+  ctx.effect(() => () => clearTimeout(prescanTimer), 'model-catalog-bigmodel: usage prescan timer')
   })
 }
