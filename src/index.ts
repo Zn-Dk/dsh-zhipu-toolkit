@@ -37,6 +37,7 @@ import type {} from '@deepseek-ai/dsh-client-connection'
 import { discoverModels, maintainedModels } from './catalog.ts'
 import { Config, LOCAL_API_KEY_REF, resolveConfig, type Config as ConfigType, type ResolvedConfig } from './config.ts'
 import { createSettingsRpcHandler, type CredentialsFace, type SettingsProviderFace } from './settings-rpc.ts'
+import { computeUsageStats } from './usage-stats.ts'
 
 export const name = 'dsh-zhipu-toolkit'
 export const inject = ['llm', 'credentials']
@@ -67,6 +68,17 @@ export type {
 export { REASONING_TIERS } from './config.ts'
 export { createSettingsRpcHandler, MUTABLE_FIELDS } from './settings-rpc.ts'
 export type { RpcResult, SettingsPathOp, SettingsProviderFace, SettingsView } from './settings-rpc.ts'
+export {
+  computeUsageStats,
+  creditFactorsFor,
+  defaultSessionsDir,
+  FLASH_CREDIT_FACTORS,
+  GLM53_CREDIT_FACTORS,
+  resetUsageStatsCache,
+} from './usage-stats.ts'
+export type {
+  UsageCreditFactors, UsageModelRow, UsageStatsResult, UsageWindowStats,
+} from './usage-stats.ts'
 
 /** Settings namespace owned by this plugin (lowercase kebab-case). */
 export const SETTINGS_NAMESPACE = 'zhipu-toolkit'
@@ -294,6 +306,9 @@ export function apply(ctx: Context, rawConfig: ConfigType): void {
         webCtx.settings as unknown as SettingsProviderFace,
         SETTINGS_NAMESPACE,
         credentialsFace,
+        undefined,
+        // Read-only local usage aggregate (60s cached, never leaves the host).
+        () => computeUsageStats(),
       )
       webCtx.effect(() => connection.rpc.handle(
         SETTINGS_CHANNEL,
@@ -308,5 +323,12 @@ export function apply(ctx: Context, rawConfig: ConfigType): void {
         },
       ), 'dsh-zhipu-toolkit: settings RPC channel')
     })
+
+    // Fire-and-forget usage pre-scan: by the time the user opens the
+    // settings card the 60s-cached, incrementally-built aggregate is
+    // usually ready, so the panel reads instantly instead of waiting on a
+    // cold ~30s scan. Failures stay silent — the card degrades to its
+    // loading/empty state and the next RPC attempt retries anyway.
+    void computeUsageStats().catch(() => undefined)
   })
 }

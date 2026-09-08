@@ -48,6 +48,7 @@ interface PrimitivesModule {
   IconChevronDownOutline14: (props: Record<string, unknown>) => unknown
   IconEditOutline16: (props: Record<string, unknown>) => unknown
   IconCloseOutline16: (props: Record<string, unknown>) => unknown
+  IconRightUpOutline16: (props: Record<string, unknown>) => unknown
 }
 interface LocaleService {
   register(ns: string, dicts: Record<string, Record<string, string>>): () => void
@@ -99,6 +100,17 @@ function browserLanguage(): string {
   return nav?.language ?? 'en'
 }
 
+/**
+ * Open an external page in a new tab with noopener/noreferrer enforced.
+ * The official Button renders a native <button>, and wrapping it in an
+ * <a target=_blank> would be invalid interactive nesting — so the new-tab
+ * semantics ride the window.open features string instead of target/rel.
+ */
+function openExternal(url: string): void {
+  const w = (globalThis as { window?: { open?: (url: string, target: string, features: string) => unknown } }).window
+  w?.open?.(url, '_blank', 'noopener,noreferrer')
+}
+
 const __moduleLoader: ModuleLoaderFacade
   = (globalThis as unknown as { window: { __ModuleLoader__: ModuleLoaderFacade } }).window.__ModuleLoader__
 
@@ -115,6 +127,11 @@ __moduleLoader.load({
     const LOCALE_NS = 'zhipu-toolkit'
     const REASONING_TIERS = ['low', 'medium', 'high', 'xhigh', 'max']
     const ENDPOINT_CHOICES = ['coding', 'paas']
+    // Official BigModel console deep links: there is no public usage API
+    // (probed endpoints all 404), so the console pages are the authoritative
+    // surfaces the card can link to.
+    const USAGE_URL = 'https://www.bigmodel.cn/coding-plan/personal/usage'
+    const RATE_LIMITS_URL = 'https://bigmodel.cn/usercenter/proj-mgmt/rate-limits'
 
     /**
      * Copy table. zh/en key sets are 1:1 (checked by scripts/check-i18n.mjs);
@@ -164,6 +181,23 @@ __moduleLoader.load({
         saved: '已保存',
         unloading: '等待宿主…',
         envPatternHint: '仅字母、数字与下划线。',
+        usageQuotaTitle: '用量与额度',
+        usageLink: 'Coding Plan 用量统计',
+        limitsLink: '速率限制',
+        usageRulesPlan: '套餐限额：5 小时 + 每周双限额，耗尽后等周期恢复、不扣余额；非高峰时段（工作日 14-18 点外）积分消耗 5 折。',
+        usageRulesCredits: '积分系数（每万 token）：GLM-5.3=6.9/24、Flash=2.3/8。',
+        usageRulesApi: '普通 API 按 token 计费，无场景限制。',
+        usageDisclaimer: '本机 session 日志聚合，非账号权威数据；套餐 5 小时/每周限额以 BigModel 控制台为准。',
+        usageLocalTitle: '本机 BigModel 路由用量（累计）',
+        usageLoading: '正在扫描本机会话日志…',
+        usageScanHint: '首次约 30 秒，可先离开此页稍后回来；扫描在宿主后台进行，已扫描的文件不会重复扫描。',
+        usageEmpty: '本机暂无 GLM 调用记录',
+        usageStatRequests: '{n} 次请求',
+        usageStatInput: '输入 {n}',
+        usageStatOutput: '输出 {n}',
+        usageStatCredits: '{n} 积分',
+        usageApprox: '近似系数',
+        usageWindow: '最近 5 小时：{requests} 次 · ≈{credits} 积分',
       },
       en: {
         nav: 'Zhipu Toolkit',
@@ -206,6 +240,23 @@ __moduleLoader.load({
         saved: 'Saved',
         unloading: 'Waiting for the host…',
         envPatternHint: 'Letters, digits, and underscores only.',
+        usageQuotaTitle: 'Usage & quota',
+        usageLink: 'Coding Plan usage',
+        limitsLink: 'Rate limits',
+        usageRulesPlan: 'Plan quota: 5-hour + weekly dual limits; exhausted quota restores with the cycle and never touches the balance; credit burn is 50% off off-peak (outside weekday 14:00-18:00).',
+        usageRulesCredits: 'Credit factors (per 10k tokens): GLM-5.3=6.9/24, Flash=2.3/8.',
+        usageRulesApi: 'The ordinary API bills per token with no scene restriction.',
+        usageDisclaimer: 'Aggregated from local session logs — not authoritative account data; the official BigModel console remains the source for the 5-hour/weekly plan quota.',
+        usageLocalTitle: 'Local BigModel-routed usage (cumulative)',
+        usageLoading: 'Scanning local session logs…',
+        usageScanHint: 'The first scan takes about 30s — feel free to leave this page and come back; it runs in the host background and already-scanned files are never re-scanned.',
+        usageEmpty: 'No local GLM calls on record',
+        usageStatRequests: '{n} requests',
+        usageStatInput: 'in {n}',
+        usageStatOutput: 'out {n}',
+        usageStatCredits: '{n} credits',
+        usageApprox: 'approx factors',
+        usageWindow: 'Last 5h: {requests} requests · ≈{credits} credits',
       },
     }
 
@@ -258,6 +309,18 @@ __moduleLoader.load({
       '.zt_iconBtn:hover{color:var(--dsw-alias-label-primary);background:var(--dsw-alias-bg-layer-2)}',
       '.zt_iconBtn:disabled{opacity:0.4;cursor:default;background:transparent;color:var(--dsw-alias-label-tertiary)}',
       '.zt_masked{display:inline-flex;align-items:center;height:32px;padding:0 10px;border:0.5px solid var(--dsw-alias-border-l4);border-radius:8px;background:var(--dsw-alias-bg-layer-1);color:var(--dsw-alias-label-secondary);font-size:14px;line-height:22px;flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}',
+      '.zt_usage{display:flex;flex-direction:column;gap:8px;border-top:0.5px solid var(--dsw-alias-border-l2);padding-top:10px}',
+      '.zt_usageTitle{margin:0;font-size:12px;line-height:18px;font-weight:500;color:var(--dsw-alias-label-secondary)}',
+      '.zt_usageLinks{display:flex;flex-wrap:wrap;gap:8px}',
+      '.zt_usageRows{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}',
+      '.zt_usageCard{display:flex;flex-direction:column;gap:6px;padding:8px 10px;border:0.5px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);min-width:0}',
+      '.zt_usageCardHead{display:flex;align-items:center;gap:6px;min-width:0}',
+      '.zt_usageModel{font-size:14px;line-height:20px;font-weight:500;color:var(--dsw-alias-label-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.zt_usageTag{flex:none;display:inline-flex;align-items:center;height:16px;padding:0 6px;border-radius:4px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-tertiary);font-size:10px;line-height:16px}',
+      '.zt_usageStats{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:2px 8px;font-variant-numeric:tabular-nums}',
+      '.zt_usageStat{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
+      '.zt_usageScan{display:flex;flex-direction:column;gap:2px}',
+      '.zt_disclaimer{margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-dimmed)}',
       '@media (prefers-reduced-motion:reduce){.zt_advancedSummary{transition:none}}',
     ].join('')
 
@@ -280,8 +343,31 @@ __moduleLoader.load({
     /** Local-key state the local-key endpoints return. */
     interface LocalKeyView { configured: boolean, writable: boolean, masked: string }
 
+    /** One per-model row of the local usage aggregate (src/usage-stats.ts shape). */
+    interface UsageModelRowView {
+      model: string
+      requests: number
+      inputTokens: number
+      outputTokens: number
+      credits: number
+      approximate: boolean
+    }
+
+    /** The slice of UsageStatsResult the card renders. */
+    interface UsageView {
+      models: UsageModelRowView[]
+      window: { requests: number, credits: number } | null
+    }
+
+    /** Failed/absent scans degrade to this: the block shows its empty state. */
+    const EMPTY_USAGE: UsageView = { models: [], window: null }
+
     /** Credential-ref shape the bridge resolves: letters, digits, underscores. */
     const ENV_REF_PATTERN = /^[A-Za-z0-9_]*$/
+
+    /** Compact number forms for the usage rows (stable across locales). */
+    const fmtInt = (value: number): string => Math.round(value).toLocaleString('en-US')
+    const fmtCredits = (value: number): string => (Math.round(value * 10) / 10).toLocaleString('en-US')
 
     /**
      * One text field with a local draft: the write RPC fires on blur/Enter
@@ -358,6 +444,7 @@ __moduleLoader.load({
       const connection = props.connection
       const [view, setView] = react.useState<View | undefined>(undefined)
       const [localKey, setLocalKey] = react.useState<LocalKeyView | undefined>(undefined)
+      const [usage, setUsage] = react.useState<UsageView | undefined>(undefined)
       const [error, setError] = react.useState<string | undefined>(undefined)
       const [readOnly, setReadOnly] = react.useState(false)
       const [saved, setSaved] = react.useState(false)
@@ -375,10 +462,13 @@ __moduleLoader.load({
         return locale.subscribe(() => { setLocaleTick(tick => tick + 1) })
       }, [locale])
       const active = locale === undefined ? browserLanguage() : locale.getLocale().active
-      const t = (key: string): string => {
+      const t = (key: string, params?: Record<string, unknown>): string => {
         void localeTick
         const table = dictFor(active)
-        return table[key] ?? I18N.en[key] ?? key
+        const raw = table[key] ?? I18N.en[key] ?? key
+        if (params === undefined) return raw
+        return raw.replace(/\{(\w+)\}/g, (match: string, name: string) =>
+          Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : match)
       }
 
       react.useEffect(() => {
@@ -402,6 +492,14 @@ __moduleLoader.load({
             if (outcome.ok) setLocalKey(outcome.value as LocalKeyView)
           })
           .catch(() => { /* the key state stays unknown; the field still works */ })
+        // Local usage aggregate: a failed scan — or an older host without
+        // the endpoint — degrades to the empty state, never a stuck spinner.
+        connection.rpc.call(SETTINGS_CHANNEL, 'usage-stats', {})
+          .then(outcome => {
+            if (cancelled) return
+            setUsage(outcome.ok ? outcome.value as UsageView : EMPTY_USAGE)
+          })
+          .catch(() => { if (!cancelled) setUsage(EMPTY_USAGE) })
         return () => { cancelled = true }
       }, [connection, reload])
 
@@ -676,6 +774,71 @@ __moduleLoader.load({
               }),
             ] }),
           ] }),
+        ] }),
+        // Usage & Quota: the public BigModel API exposes no usage endpoints
+        // (probed candidates all 404), so the console pages are the
+        // authoritative surfaces — the card deep-links to them with the
+        // official Button/Icon pair and restates the billing rules as
+        // static copy. Data disclaimers live in usageDisclaimer.
+        jsx('div', { className: 'zt_usage', children: [
+          jsx('p', { className: 'zt_usageTitle', children: t('usageQuotaTitle') }),
+          jsx('div', { className: 'zt_usageLinks', children: [
+            jsx(primitives.Button, {
+              variant: 'outline',
+              size: 'sm',
+              icon: jsx(primitives.IconRightUpOutline16, {}),
+              onClick: () => { openExternal(USAGE_URL) },
+              children: t('usageLink'),
+            }),
+            jsx(primitives.Button, {
+              variant: 'outline',
+              size: 'sm',
+              icon: jsx(primitives.IconRightUpOutline16, {}),
+              onClick: () => { openExternal(RATE_LIMITS_URL) },
+              children: t('limitsLink'),
+            }),
+          ] }),
+          // Local aggregate from the session logs (read-only `usage-stats`
+          // endpoint, 60s host-side cache, data never leaves the machine).
+          jsx('div', { className: 'zt_usageLocal', children: [
+            jsx('p', { className: 'zt_usageTitle', children: t('usageLocalTitle') }),
+            usage === undefined
+              // Loading is honest about the cold scan: it names the wait, says
+              // leaving the page is safe, and notes the host keeps scanning
+              // in the background (already-scanned files are never redone).
+              ? jsx('div', { className: 'zt_usageScan', children: [
+                  jsx('p', { className: 'zt_hint', children: t('usageLoading') }),
+                  jsx('p', { className: 'zt_hint', children: t('usageScanHint') }),
+                ] })
+              : usage.models.length === 0
+                ? jsx('p', { className: 'zt_hint', children: t('usageEmpty') })
+                : jsx('div', { className: 'zt_usageRows', children:
+                    usage.models.map(row => jsx('div', { className: 'zt_usageCard', key: row.model, children: [
+                      jsx('div', { className: 'zt_usageCardHead', children: [
+                        jsx('span', { className: 'zt_usageModel', children: row.model }),
+                        row.approximate ? jsx('span', { className: 'zt_usageTag', children: t('usageApprox') }) : null,
+                      ] }),
+                      // Two-column stat grid with tabular numerals, aligned
+                      // with the host settings cards' compact stat look.
+                      jsx('div', { className: 'zt_usageStats', children: [
+                        jsx('span', { className: 'zt_usageStat', children: t('usageStatRequests', { n: fmtInt(row.requests) }) }),
+                        jsx('span', { className: 'zt_usageStat', children: t('usageStatInput', { n: fmtInt(row.inputTokens) }) }),
+                        jsx('span', { className: 'zt_usageStat', children: t('usageStatOutput', { n: fmtInt(row.outputTokens) }) }),
+                        jsx('span', { className: 'zt_usageStat', children: t('usageStatCredits', { n: (row.approximate ? '≈' : '') + fmtCredits(row.credits) }) }),
+                      ] }),
+                    ] })),
+                  }),
+            usage !== undefined && usage.models.length > 0 && usage.window !== null
+              ? jsx('p', { className: 'zt_hint', children: t('usageWindow', {
+                  requests: fmtInt(usage.window.requests),
+                  credits: fmtCredits(usage.window.credits),
+                }) })
+              : null,
+          ] }),
+          jsx('p', { className: 'zt_hint', children: t('usageRulesPlan') }),
+          jsx('p', { className: 'zt_hint', children: t('usageRulesCredits') }),
+          jsx('p', { className: 'zt_hint', children: t('usageRulesApi') }),
+          jsx('p', { className: 'zt_disclaimer', children: t('usageDisclaimer') }),
         ] }),
         jsx('div', { className: 'zt_footer', children: saved
           ? jsx('p', { className: 'zt_saved', children: [

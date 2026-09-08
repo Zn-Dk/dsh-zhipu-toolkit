@@ -291,3 +291,43 @@ describe('local API key endpoints', () => {
     })
   })
 })
+
+describe('usage-stats endpoint', () => {
+  const aggregate = {
+    generatedAt: 1,
+    sessionsDir: '/tmp/x',
+    scannedFiles: 0,
+    skippedLargeFiles: 0,
+    badFrames: 0,
+    totalRequests: 0,
+    totalInputTokens: 0,
+    totalOutputTokens: 0,
+    totalCredits: 0,
+    models: [],
+    window: null,
+    warnings: [],
+  } as unknown as import('../src/usage-stats.ts').UsageStatsResult
+
+  it('returns the local aggregate from the injected producer', async () => {
+    const handler = createSettingsRpcHandler(fakeProvider(), 'zhipu-toolkit', undefined, undefined, async () => aggregate)
+    await expect(handler('usage-stats', {})).resolves.toEqual({ ok: true, value: aggregate })
+  })
+
+  it('propagates a producer failure as settings-rejected', async () => {
+    const handler = createSettingsRpcHandler(fakeProvider(), 'zhipu-toolkit', undefined, undefined, async () => {
+      throw new Error('session logs unreadable')
+    })
+    await expect(handler('usage-stats', {})).resolves.toEqual({
+      ok: false,
+      error: { code: 'settings-rejected', message: 'session logs unreadable' },
+    })
+  })
+
+  it('fails with a typed code when no producer is wired', async () => {
+    const handler = createSettingsRpcHandler(fakeProvider(), 'zhipu-toolkit')
+    await expect(handler('usage-stats', {})).resolves.toEqual({
+      ok: false,
+      error: { code: 'unavailable', message: 'usage statistics are not available in this deployment' },
+    })
+  })
+})

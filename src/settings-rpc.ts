@@ -23,6 +23,8 @@
  * @module dsh-zhipu-toolkit/settings-rpc
  */
 
+import type { UsageStatsResult } from './usage-stats.ts'
+
 /** Which card-editable fields the mutate endpoint may write. */
 export const MUTABLE_FIELDS = [
   'endpoints',
@@ -115,6 +117,9 @@ const MUTABLE = new Set<string>(MUTABLE_FIELDS)
  *   a deployment without one can pass a stub rejecting every call).
  * @param localKeyRef - the credential reference the local key is stored
  *   under (default `ZHIPU_TOOLKIT_API_KEY`).
+ * @param usageStats - the local usage aggregate producer backing the
+ *   read-only `usage-stats` endpoint; omit it in deployments without
+ *   session-log access and the endpoint degrades to a typed failure.
  * @returns async `(endpoint, payload) => RpcResult`.
  */
 export function createSettingsRpcHandler(
@@ -122,6 +127,7 @@ export function createSettingsRpcHandler(
   namespace: string,
   credentials?: CredentialsFace,
   localKeyRef: string = 'ZHIPU_TOOLKIT_API_KEY',
+  usageStats?: () => Promise<UsageStatsResult>,
 ): (endpoint: string, payload: unknown) => Promise<RpcResult> {
   const view = (): SettingsView => {
     const descriptor = settings.describe({ redactSecrets: true })
@@ -140,6 +146,12 @@ export function createSettingsRpcHandler(
   return async (endpoint: string, rawPayload: unknown): Promise<RpcResult> => {
     try {
       if (endpoint === 'get') return result(view())
+      if (endpoint === 'usage-stats') {
+        if (usageStats === undefined) {
+          return failure('unavailable', 'usage statistics are not available in this deployment')
+        }
+        return result(await usageStats())
+      }
       if (endpoint === 'local-key') return result(await localKeyView())
       if (endpoint === 'set-local-key') {
         if (credentials === undefined) {

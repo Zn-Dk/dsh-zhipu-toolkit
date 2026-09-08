@@ -46,6 +46,25 @@ describe('maintained GLM family descriptors', () => {
     }
   })
 
+  it('glm-5.3-flash is the native multimodal entry: text + image input', () => {
+    // Official GLM-5.3-Flash docs: input = video, image, text, file (multi
+    // image_url parts, URL or Base64). pi-ai's Model["input"] type only knows
+    // "text" | "image" today, so image is enabled and video/file stay pending.
+    const flash = maintainedModels.find(model => model.id === 'glm-5.3-flash')
+    expect(flash?.input).toEqual(['text', 'image'])
+    // appendMissing's spread overlay carries the override past pi-ai's
+    // builtin entry; every other MAINTAINED model stays text-only (the
+    // builtin pi-ai catalog may keep its own multimodal entries like
+    // glm-5v-turbo — those are not ours to assert).
+    const textOnly = maintainedModels.find(model => model.id === 'glm-5.3')
+    expect(textOnly?.input).toEqual(['text'])
+    const maintainedIds = new Set(MAINTAINED_TEXT_MODELS.map(model => model.id))
+    for (const model of maintainedModels) {
+      if (!maintainedIds.has(model.id) || model.id === 'glm-5.3-flash') continue
+      expect(model.input, model.id).toEqual(['text'])
+    }
+  })
+
   it('pins the exact GLM-5.3 thinking level map from the d8189e3 fix', () => {
     expect(GLM53_THINKING_LEVEL_MAP).toEqual({
       off: null,

@@ -67,6 +67,8 @@ export interface MaintainedTextModel {
   readonly contextWindow: number
   readonly maxTokens: number
   readonly thinkingLevelMap?: Model<'openai-completions'>['thinkingLevelMap']
+  /** Input modalities; defaults to text-only when omitted. */
+  readonly input?: Model<'openai-completions'>['input']
 }
 
 /** The full GLM chat family this toolkit maintains, newest last. */
@@ -92,6 +94,11 @@ export const MAINTAINED_TEXT_MODELS: readonly MaintainedTextModel[] = [
     contextWindow: 1_000_000,
     maxTokens: 131_072,
     thinkingLevelMap: GLM53_THINKING_LEVEL_MAP,
+    // The official GLM-5.3-Flash docs list input = video, image, text, file
+    // (multi-image via messages[].content[] image_url, URL or Base64);
+    // pi-ai's Model["input"] type only knows "text" | "image" today, so
+    // image is enabled here and video/file stay pending on the type.
+    input: ['text', 'image'],
   },
 ]
 
@@ -102,6 +109,7 @@ export function textModel(
   contextWindow: number,
   maxTokens: number,
   thinkingLevelMap?: Model<'openai-completions'>['thinkingLevelMap'],
+  input?: Model<'openai-completions'>['input'],
 ): Model<'openai-completions'> {
   return {
     id,
@@ -111,7 +119,7 @@ export function textModel(
     baseUrl: CODING_BASE_URL,
     reasoning: true,
     ...thinkingLevelMap === undefined ? {} : { thinkingLevelMap },
-    input: ['text'],
+    input: input ?? ['text'],
     cost: ZERO_COST,
     compat: GLM_COMPAT,
     contextWindow,
@@ -151,6 +159,7 @@ export const maintainedModels: readonly Model<Api>[] = appendMissing(
     model.contextWindow,
     model.maxTokens,
     model.thinkingLevelMap,
+    model.input,
   )),
 )
 
