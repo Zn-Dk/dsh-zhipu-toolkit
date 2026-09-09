@@ -125,11 +125,34 @@ describe('built client bundle', () => {
     }
   })
 
-  it('registers the settings.section slot with the component itself', () => {
-    expect(bundle).toContain("ctx.slots.inject('settings.section'")
+  it('registers the settings.plugin.item slot with the component itself', () => {
+    // The official configurable-plugins tab: the card hangs on the keyed
+    // slot instead of a sidebar settings.section entry.
+    expect(bundle).toContain("ctx.slots.inject('settings.plugin.item'")
+    expect(bundle).toContain("name: 'settings.plugin.item'")
+    // Keyed by the settings namespace: the tab pairs the card with the
+    // Host-registered `zhipu-toolkit` namespace without interpreting it.
+    expect(bundle).toContain('key: SETTINGS_NAMESPACE')
     // The register call must pass SettingsCard directly — not a wrapper like
     // () => jsx(SettingsCard, null), which renders a blank panel.
     expect(bundle).toMatch(/\}\s*,\s*SettingsCard\s*\)/)
+  })
+
+  it('draws the collapsible card shell itself: li + header + rotating chevron', () => {
+    // The tab dispatches straight into its <ul>, so the card root is an <li>
+    // (official PluginCard shape) and the card owns its disclosure chrome.
+    expect(bundle).toMatch(/jsx\('li'/)
+    expect(bundle).toContain("open ? 'zt_card zt_cardOpen' : 'zt_card'")
+    // Header disclosure button with the expanding/collapsing aria label and
+    // the official chevron rotating 180° when open.
+    expect(bundle).toContain("'aria-expanded'")
+    expect(bundle).toContain('zt_cardChevronOpen')
+    expect(bundle).toContain('zt_cardChevron')
+    // Shell copy keys ride along: one-line description + collapse/expand aria.
+    expect(bundle).toContain("t('cardDescription')")
+    // The aria label composes the state-dependent key at render time.
+    expect(bundle).toContain("t(open ? 'collapse' : 'expand')")
+    expect(bundle).toContain('BigModel GLM 双端点模型目录与用量统计')
   })
 
   it('declares the client-side service injections and the RPC channel', () => {
@@ -224,29 +247,47 @@ describe('built client bundle', () => {
       'usageLoading',
       'usageScanHint',
       'usageEmpty',
-      'usageStatRequests',
       'usageStatInput',
       'usageStatOutput',
-      'usageStatCredits',
+      'usageCreditsUnit',
       'usageApprox',
-      'usageWindow',
+      'window5h',
+      'windowToday',
+      'windowWeekly',
+      'window5hNote',
+      'usageEmptyWindow',
+      'usageUnparsed',
     ]) {
       expect(bundle).toContain(key)
     }
-    // The loading state is honest about the cold scan: it names the wait,
-    // tells the user leaving the page is safe, and that the host keeps
-    // scanning in the background without redoing scanned files.
+    // The loading state is honest about the cold scan: no promised
+    // duration, leaving the page is safe, the host keeps scanning in the
+    // background without redoing scanned files, and results are cached.
     expect(bundle).toContain('正在扫描本机会话日志…')
-    expect(bundle).toContain('首次约 30 秒，可先离开此页稍后回来')
-    expect(bundle).toContain('已扫描的文件不会重复扫描')
+    expect(bundle).toContain('首次较慢，取决于会话数量')
+    expect(bundle).toContain('已扫描文件不会重复扫描')
+    expect(bundle).toContain('结果会缓存')
+    // Real scan telemetry grounds the expectation for the next cold scan.
+    expect(bundle).toContain('usageScanDone')
+    expect(bundle).toContain('scanMs')
     // The zh panel title and the empty states are both present.
     expect(bundle).toContain('本机 BigModel 路由用量（累计）')
     expect(bundle).toContain('本机暂无 GLM 调用记录')
     expect(bundle).toContain('No local GLM calls on record')
-    // Per-model stat cards: tabular numerals grid + the approx-factor tag.
+    expect(bundle).toContain('该窗口暂无 GLM 调用记录')
+    // Window switcher (5h/today/week) + the rolling-window note.
+    expect(bundle).toContain('zt_usageTabs')
+    expect(bundle).toContain('zt_usageTabActive')
+    expect(bundle).toContain('滚动窗口近似，非官方套餐窗口边界')
+    // Per-model stat cards: tabular numerals + the approx-factor tag.
     expect(bundle).toContain('zt_usageCard')
     expect(bundle).toContain('tabular-nums')
     expect(bundle).toContain('zt_usageTag')
+    // Events-vs-aggregated payload modes + the pure helper export the unit
+    // suite drives.
+    expect(bundle).toContain("=== 'aggregated'")
+    expect(bundle).toContain('sliceUsageEvents')
+    expect(bundle).toContain('usageView')
     // The degrade-to-empty sentinel guards against a stuck spinner.
     expect(bundle).toContain('EMPTY_USAGE')
   })

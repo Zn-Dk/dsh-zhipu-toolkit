@@ -13,13 +13,12 @@ import {
 } from '../src/usage-stats.ts'
 
 /**
- * Aggregation math against synthetic session logs shaped like the real DSH
- * session envelope (`{type, seq, time, data}` with `data.usage` +
- * `data.message.source.model` on the assistant/message events): one
- * multi-frame .jsonl.zstd (good frames + one corrupt frame), one bare
- * .jsonl, one oversize skip, and a catalog of attribution edge cases. All
- * calls run against a temp sessions root and an injected clock, so the 5h
- * window is deterministic.
+ * Event-detail shape + aggregation math against synthetic session logs
+ * shaped like the real DSH envelope (`{type, seq, time, data}` with
+ * `data.usage` + `data.message.source.model` on the assistant/message
+ * events). Events mode carries the minimal row detail; past EVENTS_CAP the
+ * detail collapses into per-model rows + the 5h window. All calls run
+ * against a temp sessions root and an injected clock.
  */
 
 const BASE = Date.parse('2026-09-06T12:00:00Z')
@@ -53,14 +52,14 @@ const envelopeLine = (
   model: string,
   inputTokens: number,
   outputTokens: number,
-  time: number,
+  time: number | null,
   seq = 1,
   cacheReadTokens?: number,
 ): string =>
   JSON.stringify({
     type: 'assistant/message',
     seq,
-    time,
+    ...(time === null ? {} : { time }),
     data: {
       turn: 1,
       step: 1,
@@ -137,29 +136,23 @@ describe('extractUsageEvent', () => {
   })
 })
 
-describe('computeUsageStats aggregation', () => {
-  it('aggregates multi-frame zstd + bare jsonl with the fixture math', async () => {
+describe('computeUsageStats (events mode)', () => {
+  it('returns minimal event rows with cumulative totals', async () => {
     const frame1 = frame([
-      // 9.3 credits (6.9 + 2.4); inside the 5h window.
       envelopeLine('glm-5.3', 10000, 1000, BASE - 1 * HOUR, 1),
-      // 5.75 + 2 = 7.75 credits; cacheRead counts as input (25000 total);
-      // 6h old → outside the window.
       envelopeLine('glm-5.3-flash', 20000, 2500, BASE - 6 * HOUR, 2, 5000),
-      // Non-GLM traffic is not ours to count.
       envelopeLine('claude-x', 999999, 999999, BASE - HOUR, 3),
-      // Usage without a model, and a line that is not JSON at all.
       '{"data":{"usage":{"inputTokens":1,"outputTokens":1}},"time":' + String(BASE) + '}',
       'not json at all',
     ])
     const frame2 = frame([
-      // 0.69 + 0.24 = 0.93 credits; approximate row (no timestamp → totals only).
+      // No timestamp on this envelope → the event rides along with time:null.
       '{"type":"assistant/message","seq":4,"data":{"turn":1,"step":1,'
       + '"message":{"role":"assistant","source":{"model":"glm-4.7"}},'
       + '"usage":{"inputTokens":1000,"outputTokens":100}}}',
     ])
     const corrupt = Buffer.concat([ZSTD_MAGIC, Buffer.from('definitely-not-a-zstd-frame')])
     put('proj-a/s1', 'session.jsonl.zstd', Buffer.concat([frame1, frame2, corrupt]))
-    // Bare fallback file: +4.65 credits (3.45 + 1.2), 30min old → in window.
     put('proj-b/s2', 'session.jsonl', Buffer.from(
       envelopeLine('glm-5.3', 5000, 500, BASE - 0.5 * HOUR, 5) + '\ngarbage\n',
       'utf8',
@@ -167,32 +160,25 @@ describe('computeUsageStats aggregation', () => {
 
     const result = await computeUsageStats({ sessionsDir: root, now: BASE })
 
+    expect(result.mode).toBe('events')
+    expect(result.models).toBeNull()
+    expect(result.window).toBeNull()
     expect(result.scannedFiles).toBe(2)
+    expect(result.scanMs).toBeTypeOf('number')
+    expect(result.scanMs).toBeGreaterThanOrEqual(0)
     expect(result.badFrames).toBe(1)
-    expect(result.skippedLargeFiles).toBe(0)
     expect(result.totalRequests).toBe(4)
     expect(result.totalInputTokens).toBe(41000)
     expect(result.totalOutputTokens).toBe(4100)
-    // Rows sort by credits, largest first.
-    expect(result.models.map(row => row.model)).toEqual(['glm-5.3', 'glm-5.3-flash', 'glm-4.7'])
-    expect(result.models[0]).toMatchObject({
-      model: 'glm-5.3', requests: 2, inputTokens: 15000, outputTokens: 1500, approximate: false,
-    })
-    expect(result.models[0].credits).toBeCloseTo(13.95, 6)
-    expect(result.models[1]).toMatchObject({
-      model: 'glm-5.3-flash', requests: 1, inputTokens: 25000, outputTokens: 2500, approximate: false,
-    })
-    expect(result.models[1].credits).toBeCloseTo(7.75, 6)
-    expect(result.models[2]).toMatchObject({
-      model: 'glm-4.7', requests: 1, inputTokens: 1000, outputTokens: 100, approximate: true,
-    })
-    expect(result.models[2].credits).toBeCloseTo(0.93, 6)
-    // Two timestamped events fall inside the 5h window; the 6h-old one does not.
-    expect(result.window).not.toBeNull()
-    expect(result.window?.requests).toBe(2)
-    expect(result.window?.inputTokens).toBe(15000)
-    expect(result.window?.outputTokens).toBe(1500)
-    expect(result.window?.credits).toBeCloseTo(13.95, 6)
+    // Event detail: minimal rows only, null time preserved for the
+    // timestamp-less envelope, non-GLM traffic absent.
+    expect(result.events).toEqual([
+      { model: 'glm-5.3', inputTokens: 10000, outputTokens: 1000, time: BASE - 1 * HOUR },
+      { model: 'glm-5.3-flash', inputTokens: 25000, outputTokens: 2500, time: BASE - 6 * HOUR },
+      { model: 'glm-4.7', inputTokens: 1000, outputTokens: 100, time: null },
+      { model: 'glm-5.3', inputTokens: 5000, outputTokens: 500, time: BASE - 0.5 * HOUR },
+    ])
+    expect(result.totalCredits).toBeCloseTo(9.3 + 7.75 + 0.93 + 4.65, 6)
   })
 
   it('skips oversize files with a warning and reports them', async () => {
@@ -205,13 +191,30 @@ describe('computeUsageStats aggregation', () => {
     expect(result.warnings.some(w => w.includes('10 MB cap'))).toBe(true)
   })
 
-  it('gives a cumulative-only result (window null) without timestamps', async () => {
-    put('proj-d/s5', 'session.jsonl.zstd', frame([
-      '{"type":"assistant/message","seq":7,"data":{"message":{"source":{"model":"glm-5.3"}},"usage":{"inputTokens":10,"outputTokens":10}}}',
-    ]))
+  it('collapses into aggregated mode past EVENTS_CAP with rows + 5h window', async () => {
+    // 50,002 events: two glm-5.3/flash lines and the bulk as glm-4.7
+    // (approximate factors) — enough to trip EVENTS_CAP.
+    const lines: string[] = [
+      envelopeLine('glm-5.3', 10000, 1000, BASE - 1 * HOUR, 1),
+      envelopeLine('glm-5.3-flash', 20000, 2500, BASE - 6 * HOUR, 2),
+    ]
+    for (let i = 0; i < 50_000; i++) {
+      lines.push(envelopeLine('glm-4.7', 100, 10, BASE - 2 * HOUR, 100 + i))
+    }
+    put('proj-d/s5', 'session.jsonl.zstd', frame(lines))
     const result = await computeUsageStats({ sessionsDir: root, now: BASE })
-    expect(result.window).toBeNull()
-    expect(result.totalRequests).toBe(1)
+    expect(result.mode).toBe('aggregated')
+    expect(result.events).toEqual([])
+    expect(result.totalRequests).toBe(50_002)
+    // Cumulative rows sorted by credits, largest first: glm-4.7 bulk wins
+    // (50k × (0.069 + 0.024) = 4650) over glm-5.3 (9.3) and flash (7.75).
+    expect(result.models?.map(row => row.model)).toEqual(['glm-4.7', 'glm-5.3', 'glm-5.3-flash'])
+    expect(result.models?.[0]).toMatchObject({ requests: 50_000, inputTokens: 5_000_000, outputTokens: 500_000, approximate: true })
+    expect(result.models?.[0].credits).toBeCloseTo(4650, 4)
+    // The 5h window: the glm-5.3 line (1h old) and all 50k glm-4.7 lines
+    // (2h old) fall inside it; the flash line (6h old) does not.
+    expect(result.window?.requests).toBe(50_001)
+    expect(result.window?.inputTokens).toBe(5_010_000)
   })
 
   it('caches per sessions dir until the TTL or a forced refresh', async () => {
@@ -245,8 +248,9 @@ describe('computeUsageStats aggregation', () => {
 
   it('degrades to an empty aggregate for a missing sessions dir', async () => {
     const result = await computeUsageStats({ sessionsDir: join(root, 'does-not-exist'), now: BASE })
-    expect(result.models).toEqual([])
+    expect(result.mode).toBe('events')
+    expect(result.events).toEqual([])
     expect(result.totalRequests).toBe(0)
-    expect(result.window).toBeNull()
+    expect(result.models).toBeNull()
   })
 })

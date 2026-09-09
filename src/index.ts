@@ -72,12 +72,13 @@ export {
   computeUsageStats,
   creditFactorsFor,
   defaultSessionsDir,
+  EVENTS_CAP,
   FLASH_CREDIT_FACTORS,
   GLM53_CREDIT_FACTORS,
   resetUsageStatsCache,
 } from './usage-stats.ts'
 export type {
-  UsageCreditFactors, UsageModelRow, UsageStatsResult, UsageWindowStats,
+  UsageCreditFactors, UsageEventRow, UsageModelRow, UsageStatsMode, UsageStatsResult, UsageWindowStats,
 } from './usage-stats.ts'
 
 /** Settings namespace owned by this plugin (lowercase kebab-case). */

@@ -13,7 +13,7 @@
 - **经过验证的 GLM-5.3 思考语义** — GLM-5.3 系列模型始终思考；插件把选择器档位映射到 API 接受的线上取值（`low`/`medium`/`high` → `high`，`xhigh`/`max` → `max`），绝不发送 `thinking: disabled`（API 以错误 1210 拒绝）。
 - **实时模型发现** — 启动时以及每次设置/凭据变更后轮询 `/models`；端点停发的模型自动移出，直连验证过的模型在端点滞后时保留。
 - **卡片内本地 API key** — 可选在卡片上直接保存 key（存入 dsh 凭证库 `ZHIPU_TOOLKIT_API_KEY`，绝不写入 settings.yaml）；已保存的 key 以掩码摘要显示（仅末几位）并配图标按钮原地编辑或清除，环境变量引用路径保留为回退。
-- **设置卡片（Web GUI）** — `settings.section` 卡片通过白名单 RPC 桥编辑端点、凭据引用、显示名、默认推理档与本地 API key；配置热更新（无需重启）。
+- **设置卡片（Web GUI）** — 卡片位于官方**「设置 → 插件」配置页**（以 settings namespace 为键的 `settings.plugin.item` slot，与其他可配置插件并列），通过白名单 RPC 桥编辑端点、凭据引用、显示名、默认推理档与本地 API key；配置热更新（无需重启）。
 - **双语界面** — 卡片跟随宿主 locale 服务（zh-CN / en），locale 服务不可用时回退浏览器语言。
 
 ## 安装

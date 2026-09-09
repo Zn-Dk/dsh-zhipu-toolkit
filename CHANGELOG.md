@@ -5,7 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.1] - 2026-09-09
+
+### 变更 / Changed
+
+- 设置卡片从侧栏独立导航项迁移到官方「设置 → 插件」配置 tab：卡片改挂 `settings.plugin.item` keyed slot（以 settings namespace `zhipu-toolkit` 为键，宿主按 namespace 与已注册设置节配对枚举），与其他可配置插件并列；侧栏不再有独立入口。卡片自带与官方 PluginCard 对齐的折叠外壳（`<li>` 卡壳 + 标题/描述头部按钮 `aria-expanded` + chevron 旋转开合，内容默认收起）；卡片内部控件（本地 key、用量统计、深链）与 Host 侧 settings 注册零改动。
 
 ## [0.2.0] - 2026-09-08
 

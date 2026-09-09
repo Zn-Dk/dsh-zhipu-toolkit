@@ -13,7 +13,7 @@ A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) plugin tha
 - **Verified GLM-5.3 thinking semantics** — GLM-5.3-series models always think; the plugin maps picker tiers onto the wire values the API accepts (`low`/`medium`/`high` → `high`, `xhigh`/`max` → `max`) and never wires `thinking: disabled` (the API refuses it with error 1210).
 - **Live model discovery** — `/models` is polled at startup and after every settings/credential change; models the endpoint stopped serving drop out, while directly-verified models survive endpoint lag.
 - **Local API key on the settings card** — optionally hold the key right on the card (stored in the dsh credentials store as `ZHIPU_TOOLKIT_API_KEY`, never in settings.yaml); a saved key shows as a masked summary (last characters only) with icon actions to edit-in-place or clear, and the env-reference path stays as fallback.
-- **Settings card (Web GUI)** — a `settings.section` card edits the endpoint, credential refs, display name, default reasoning tier, and the local API key over a whitelisted RPC bridge; configuration is hot-reloadable (no restart).
+- **Settings card (Web GUI)** — the card lives in the official **Settings → Plugins** configuration tab (a `settings.plugin.item` slot keyed by the settings namespace, alongside the other configurable plugins) and edits the endpoint, credential refs, display name, default reasoning tier, and the local API key over a whitelisted RPC bridge; configuration is hot-reloadable (no restart).
 - **Bilingual UI** — the card follows the host locale service (zh-CN / en) with a browser-language fallback.
 
 ## Install

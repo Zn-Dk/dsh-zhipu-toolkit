@@ -11,13 +11,21 @@
  * Decoding: the .zstd logs are multi-frame — the payload is split on the
  * zstd frame magic (28 B5 2F FD) and each frame is decompressed
  * independently with `zstdDecompressSync`; a bad frame is skipped (counted,
- * never fatal). Numbers aggregate per model with the official BigModel
- * credit factors (per 10k tokens): GLM-5.3 in 6.9 / out 24, GLM-5.3-Flash
- * in 2.3 / out 8; every other glm-* model borrows the GLM-5.3 row and is
- * flagged `approximate`.
+ * never fatal).
+ *
+ * Result shape: the scan produces event-level detail (`events`: minimal
+ * {model, inputTokens, outputTokens, time} rows) and the CLIENT slices the
+ * 5h/today/week windows from it. Past EVENTS_CAP events the detail is
+ * collapsed server-side into per-model rows + a 5h window (`mode:
+ * 'aggregated'`) so the RPC payload stays bounded; the client then shows
+ * cumulative rows without window switching.
+ *
+ * Credits: official BigModel factors per 10k tokens — GLM-5.3 in 6.9 /
+ * out 24, GLM-5.3-Flash in 2.3 / out 8; every other glm-* model borrows
+ * the GLM-5.3 row and is flagged `approximate`.
  *
  * Discipline: everything stays on this machine — the aggregate (never raw
- * events, never prompts) is served to the settings card over the
+ * event text, only numeric rows) is served to the settings card over the
  * /zhipu-toolkit-settings channel and nothing ever leaves the host.
  * Results cache per sessions dir for 60s; files over 10MB are skipped.
  *
@@ -52,7 +60,16 @@ export function creditFactorsFor(model: string): { factors: UsageCreditFactors, 
   return { factors: GLM53_CREDIT_FACTORS, approximate: true }
 }
 
-/** Per-model aggregate served to the card. */
+/** One minimal event row: the only per-event shape that crosses the RPC. */
+export interface UsageEventRow {
+  readonly model: string
+  readonly inputTokens: number
+  readonly outputTokens: number
+  /** Epoch ms when the log carried a parseable timestamp, else null. */
+  readonly time: number | null
+}
+
+/** Per-model cumulative aggregate (aggregated mode rows). */
 export interface UsageModelRow {
   readonly model: string
   readonly requests: number
@@ -64,7 +81,7 @@ export interface UsageModelRow {
   readonly approximate: boolean
 }
 
-/** The recent-5h slice; only present when logs carried parseable timestamps. */
+/** The recent-5h slice; only meaningful in aggregated mode. */
 export interface UsageWindowStats {
   readonly since: number
   readonly requests: number
@@ -73,20 +90,28 @@ export interface UsageWindowStats {
   readonly credits: number
 }
 
-/** Full aggregate served over the `usage-stats` RPC endpoint. */
+/** Which shape the payload carries (see module docs). */
+export type UsageStatsMode = 'events' | 'aggregated'
+
+/** Full result served over the `usage-stats` RPC endpoint. */
 export interface UsageStatsResult {
   readonly generatedAt: number
   readonly sessionsDir: string
   readonly scannedFiles: number
   readonly skippedLargeFiles: number
   readonly badFrames: number
+  /** Wall-clock duration of this scan (decode + parse), in milliseconds. */
+  readonly scanMs: number
   readonly totalRequests: number
   readonly totalInputTokens: number
   readonly totalOutputTokens: number
   readonly totalCredits: number
-  /** Sorted by credits, largest first. */
-  readonly models: readonly UsageModelRow[]
-  /** Null when no event carried a parseable timestamp (cumulative only). */
+  readonly mode: UsageStatsMode
+  /** Event detail (events mode); empty in aggregated mode. */
+  readonly events: readonly UsageEventRow[]
+  /** Per-model cumulative rows (aggregated mode); null in events mode. */
+  readonly models: readonly UsageModelRow[] | null
+  /** The 5h window (aggregated mode); null in events mode (client slices). */
   readonly window: UsageWindowStats | null
   readonly warnings: readonly string[]
 }
@@ -98,6 +123,8 @@ const CONCURRENCY = 3
 const WINDOW_MS = 5 * 60 * 60 * 1000
 const CACHE_TTL_MS = 60_000
 const MAX_WARNINGS = 5
+/** Past this many events the detail collapses into pre-aggregated rows. */
+export const EVENTS_CAP = 50_000
 
 const ZSTD_MAGIC = Buffer.from([0x28, 0xB5, 0x2F, 0xFD])
 
@@ -209,52 +236,15 @@ export function extractUsageEvent(line: string): {
   }
 }
 
-interface ModelAccumulator {
-  requests: number
-  inputTokens: number
-  outputTokens: number
-  credits: number
-  approximate: boolean
-}
-
-/** One timestamped event kept per file so the 5h window can be re-sliced on merge. */
-interface TimestampedUsage {
-  readonly ts: number
-  readonly inputTokens: number
-  readonly outputTokens: number
-  readonly credits: number
-}
-
-/** Per-file aggregate: mergeable, and cacheable by (size, mtime). */
+/** Minimal per-file aggregate: event rows + bad-frame count, cache-friendly. */
 interface FileAggregate {
-  rows: Map<string, ModelAccumulator>
-  badFrames: number
-  timestamped: TimestampedUsage[]
-}
-
-interface Accumulator {
-  rows: Map<string, ModelAccumulator>
-  window: { requests: number, inputTokens: number, outputTokens: number, credits: number }
-  windowHasTimestamps: boolean
+  events: UsageEventRow[]
   badFrames: number
 }
 
-function newAccumulator(): Accumulator {
-  return {
-    rows: new Map(),
-    window: { requests: 0, inputTokens: 0, outputTokens: 0, credits: 0 },
-    windowHasTimestamps: false,
-    badFrames: 0,
-  }
-}
-
-function creditsFor(inputTokens: number, outputTokens: number, factors: UsageCreditFactors): number {
-  return (inputTokens / 10_000) * factors.inputPer10k + (outputTokens / 10_000) * factors.outputPer10k
-}
-
-/** Decode one session file into a self-contained aggregate; bad frames are counted, never fatal. */
+/** Decode one session file into minimal event rows; bad frames are counted, never fatal. */
 function ingestSessionFile(buffer: Buffer, isZstd: boolean): FileAggregate {
-  const aggregate: FileAggregate = { rows: new Map(), badFrames: 0, timestamped: [] }
+  const aggregate: FileAggregate = { events: [], badFrames: 0 }
   let text: string
   if (!isZstd) {
     text = buffer.toString('utf8')
@@ -278,47 +268,47 @@ function ingestSessionFile(buffer: Buffer, isZstd: boolean): FileAggregate {
   for (const line of text.split('\n')) {
     const event = extractUsageEvent(line)
     if (event === undefined) continue
+    aggregate.events.push({
+      model: event.model,
+      inputTokens: event.inputTokens,
+      outputTokens: event.outputTokens,
+      time: event.timestamp ?? null,
+    })
+  }
+  return aggregate
+}
+
+/** Fold event rows into per-model cumulative aggregates + the 5h window. */
+function aggregateEvents(events: readonly UsageEventRow[], windowSince: number): {
+  rows: Map<string, { requests: number, inputTokens: number, outputTokens: number, credits: number, approximate: boolean }>
+  window: { requests: number, inputTokens: number, outputTokens: number, credits: number }
+  windowHasTimestamps: boolean
+} {
+  const rows = new Map<string, { requests: number, inputTokens: number, outputTokens: number, credits: number, approximate: boolean }>()
+  const window = { requests: 0, inputTokens: 0, outputTokens: 0, credits: 0 }
+  let windowHasTimestamps = false
+  for (const event of events) {
     const { factors, approximate } = creditFactorsFor(event.model)
-    const row = aggregate.rows.get(event.model)
+    const credits = (event.inputTokens / 10_000) * factors.inputPer10k + (event.outputTokens / 10_000) * factors.outputPer10k
+    const row = rows.get(event.model)
       ?? { requests: 0, inputTokens: 0, outputTokens: 0, credits: 0, approximate: false }
-    const credits = creditsFor(event.inputTokens, event.outputTokens, factors)
     row.requests++
     row.inputTokens += event.inputTokens
     row.outputTokens += event.outputTokens
     row.credits += credits
     row.approximate = row.approximate || approximate
-    aggregate.rows.set(event.model, row)
-    // Timestamped events ride along so the 5h window can be re-sliced at
-    // merge time with the CURRENT boundary (per-file caches outlive it).
-    if (event.timestamp !== undefined) {
-      aggregate.timestamped.push({ ts: event.timestamp, inputTokens: event.inputTokens, outputTokens: event.outputTokens, credits })
+    rows.set(event.model, row)
+    if (event.time !== null) {
+      windowHasTimestamps = true
+      if (event.time >= windowSince) {
+        window.requests++
+        window.inputTokens += event.inputTokens
+        window.outputTokens += event.outputTokens
+        window.credits += credits
+      }
     }
   }
-  return aggregate
-}
-
-/** Fold one file aggregate into the scan accumulator, slicing the 5h window now. */
-function mergeAggregate(target: Accumulator, source: FileAggregate, windowSince: number): void {
-  for (const [model, row] of source.rows) {
-    const merged = target.rows.get(model)
-      ?? { requests: 0, inputTokens: 0, outputTokens: 0, credits: 0, approximate: false }
-    merged.requests += row.requests
-    merged.inputTokens += row.inputTokens
-    merged.outputTokens += row.outputTokens
-    merged.credits += row.credits
-    merged.approximate = merged.approximate || row.approximate
-    target.rows.set(model, merged)
-  }
-  target.badFrames += source.badFrames
-  for (const event of source.timestamped) {
-    target.windowHasTimestamps = true
-    if (event.ts >= windowSince) {
-      target.window.requests++
-      target.window.inputTokens += event.inputTokens
-      target.window.outputTokens += event.outputTokens
-      target.window.credits += event.credits
-    }
-  }
+  return { rows, window, windowHasTimestamps }
 }
 
 /** session.jsonl.zstd / session.jsonl files under <root>/**, depth- and count-capped. */
@@ -354,7 +344,8 @@ const caches = new Map<string, { at: number, result: UsageStatsResult }>()
 /**
  * Per-file aggregate cache: unchanged files (same size + mtime) are merged
  * from cache instead of being re-decoded, so a rescan costs stat() calls
- * rather than a full zstd pass over every session log.
+ * rather than a full zstd pass over every session log. Cached aggregates
+ * hold the minimal event rows only.
  */
 const fileCaches = new Map<string, { size: number, mtimeMs: number, aggregate: FileAggregate }>()
 const FILE_CACHE_LIMIT = 4000
@@ -391,6 +382,7 @@ export async function computeUsageStats(options: ComputeUsageStatsOptions = {}):
   const pushWarning = (message: string): void => {
     if (warnings.length < MAX_WARNINGS) warnings.push(message)
   }
+  const scanStartedAt = Date.now()
   const files = await collectSessionFiles(dir, warnings)
   const sized = await Promise.all(files.map(async path => {
     try {
@@ -411,8 +403,8 @@ export async function computeUsageStats(options: ComputeUsageStatsOptions = {}):
     }
     work.push(entry)
   }
-  const acc = newAccumulator()
-  const windowSince = now - WINDOW_MS
+  const events: UsageEventRow[] = []
+  let badFrames = 0
   let scannedFiles = 0
   let cursor = 0
   const worker = async (): Promise<void> => {
@@ -422,7 +414,8 @@ export async function computeUsageStats(options: ComputeUsageStatsOptions = {}):
       const item = work[cursor++]
       const cached = fileCaches.get(item.path)
       if (cached !== undefined && cached.size === item.size && cached.mtimeMs === item.mtimeMs) {
-        mergeAggregate(acc, cached.aggregate, windowSince)
+        events.push(...cached.aggregate.events)
+        badFrames += cached.aggregate.badFrames
         scannedFiles++
         continue
       }
@@ -439,35 +432,57 @@ export async function computeUsageStats(options: ComputeUsageStatsOptions = {}):
         if (eldest !== undefined) fileCaches.delete(eldest)
       }
       fileCaches.set(item.path, { size: item.size, mtimeMs: item.mtimeMs, aggregate })
-      mergeAggregate(acc, aggregate, windowSince)
+      events.push(...aggregate.events)
+      badFrames += aggregate.badFrames
       scannedFiles++
     }
   }
   await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()))
-  const models: UsageModelRow[] = [...acc.rows.entries()]
-    .map(([model, row]) => ({ model, ...row }))
-    .sort((a, b) => b.credits - a.credits)
-  const totals = models.reduce(
-    (sum, row) => ({
-      requests: sum.requests + row.requests,
-      inputTokens: sum.inputTokens + row.inputTokens,
-      outputTokens: sum.outputTokens + row.outputTokens,
-      credits: sum.credits + row.credits,
-    }),
+  // Wall-clock scan duration as the user perceives it (this RPC's scan pass).
+  const scanMs = Date.now() - scanStartedAt
+
+  const totals = events.reduce(
+    (sum, event) => {
+      const { factors } = creditFactorsFor(event.model)
+      return {
+        requests: sum.requests + 1,
+        inputTokens: sum.inputTokens + event.inputTokens,
+        outputTokens: sum.outputTokens + event.outputTokens,
+        credits: sum.credits + (event.inputTokens / 10_000) * factors.inputPer10k + (event.outputTokens / 10_000) * factors.outputPer10k,
+      }
+    },
     { requests: 0, inputTokens: 0, outputTokens: 0, credits: 0 },
   )
+
+  // Payload guard: past the cap the detail collapses into pre-aggregated
+  // per-model rows + the 5h window; the client then shows cumulative rows
+  // without window switching.
+  const aggregated = events.length > EVENTS_CAP
+  let models: readonly UsageModelRow[] | null = null
+  let window: UsageWindowStats | null = null
+  if (aggregated) {
+    const built = aggregateEvents(events, now - WINDOW_MS)
+    models = [...built.rows.entries()]
+      .map(([model, row]) => ({ model, ...row }))
+      .sort((a, b) => b.credits - a.credits)
+    window = built.windowHasTimestamps ? { since: now - WINDOW_MS, ...built.window } : null
+  }
+
   const result: UsageStatsResult = {
     generatedAt: now,
     sessionsDir: dir,
     scannedFiles,
     skippedLargeFiles,
-    badFrames: acc.badFrames,
+    badFrames,
+    scanMs,
     totalRequests: totals.requests,
     totalInputTokens: totals.inputTokens,
     totalOutputTokens: totals.outputTokens,
     totalCredits: totals.credits,
+    mode: aggregated ? 'aggregated' : 'events',
+    events: aggregated ? [] : events,
     models,
-    window: acc.windowHasTimestamps ? { since: windowSince, ...acc.window } : null,
+    window,
     warnings,
   }
   caches.set(dir, { at: now, result })

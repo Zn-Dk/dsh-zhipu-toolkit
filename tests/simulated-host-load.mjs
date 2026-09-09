@@ -132,7 +132,8 @@ assert.equal(typeof client.apply, 'function')
 assert.deepEqual(client.inject, ['slots', 'connection', 'locale'])
 
 // Drive apply() against structural doubles: the card must mount the
-// settings.section slot and pass the SettingsCard component itself.
+// settings.plugin.item slot (keyed by the settings namespace) and pass the
+// SettingsCard component itself.
 const registered = []
 const unsubscribeLocale = () => {}
 let registeredSlot = null
@@ -154,10 +155,11 @@ const ctx = {
   },
 }
 client.apply(ctx)
-assert.deepEqual(registered, ['settings.section'])
-assert.ok(registeredSlot, 'settings.section must be registered')
+assert.deepEqual(registered, ['settings.plugin.item'])
+assert.ok(registeredSlot, 'settings.plugin.item must be registered')
 assert.equal(registeredSlot.options.id, 'dsh-zhipu-toolkit')
-assert.equal(registeredSlot.options.name, 'settings.section')
+assert.equal(registeredSlot.options.name, 'settings.plugin.item')
+assert.equal(registeredSlot.options.key, 'zhipu-toolkit', 'the card key must pair with the settings namespace')
 assert.equal(typeof registeredSlot.component, 'function', 'component must be the function itself, not a wrapper')
 assert.equal(registeredSlot.options.inject().connection, ctx.connection)
 
