@@ -9,11 +9,11 @@
 - **端点二选一（计费通道）** — 服务 Coding Plan 端点或普通 API 端点；两者暴露的模型与请求语义完全一致，选择只取决于账户走哪个计费通道。
 - **自维护 GLM 目录** — 完整 GLM 对话家族（GLM-4.5 → GLM-5.3-Flash），上下文窗口与输出上限经过验证，叠加在 pi-ai 内置目录之上。
 - **glm-5.3-flash 原生多模态（图像输入已支持）** — 官方文档标注 GLM-5.3-Flash 输入为视频/图像/文本/文件（`messages[].content[]` 可带多张 `image_url`，URL 或 Base64）；pi-ai 的 `Model["input"]` 类型目前只认 `text`/`image`，故先开放图像输入，视频/文件输入待 pi-ai 类型支持后开放，其余受维护模型保持纯文本。
-- **本机用量与额度统计** — 卡片聚合本机 session 日志（多帧 zstd 解码）为按模型 GLM 用量：请求数、token（含缓存计入）、按官方 BigModel 系数折算积分，附最近 5 小时窗口、增量缓存（热重扫即时）、宿主后台预扫与官方 console 深链；聚合只在本机计算与展示，数据绝不出本机。
+- **用量与额度（console 深链）** — 官方 BigModel 无公开用量 API，卡片直接深链到官方 console 的 Coding Plan 用量统计与速率限制页，并附静态计费规则说明（套餐 5 小时/每周双限额、非高峰 5 折、积分系数、普通 API 按 token 计费）；权威数据以官方控制台为准。
 - **经过验证的 GLM-5.3 思考语义** — GLM-5.3 系列模型始终思考；插件把选择器档位映射到 API 接受的线上取值（`low`/`medium`/`high` → `high`，`xhigh`/`max` → `max`），绝不发送 `thinking: disabled`（API 以错误 1210 拒绝）。
 - **实时模型发现** — 启动时以及每次设置/凭据变更后轮询 `/models`；端点停发的模型自动移出，直连验证过的模型在端点滞后时保留。
 - **卡片内本地 API key** — 可选在卡片上直接保存 key（存入 dsh 凭证库 `ZHIPU_TOOLKIT_API_KEY`，绝不写入 settings.yaml）；已保存的 key 以掩码摘要显示（仅末几位）并配图标按钮原地编辑或清除，环境变量引用路径保留为回退。
-- **设置卡片（Web GUI）** — 卡片位于官方**「设置 → 插件」配置页**（以 settings namespace 为键的 `settings.plugin.item` slot，与其他可配置插件并列），通过白名单 RPC 桥编辑端点、凭据引用、显示名、默认推理档与本地 API key；配置热更新（无需重启）。
+- **设置卡片（Web GUI）** — 卡片位于官方**「设置 → 插件」配置页**（以 settings namespace 为键的 `settings.plugin.item` slot，与其他可配置插件并列），经官方 `ctx.remote.settings` / `ctx.remote.credentials` Remote 编辑端点、凭据引用、显示名、默认推理档与本地 API key；配置热更新（无需重启）。
 - **双语界面** — 卡片跟随宿主 locale 服务（zh-CN / en），locale 服务不可用时回退浏览器语言。
 
 ## 安装

@@ -11,11 +11,13 @@
  * - types are structural and local; no type-only imports (tsc emits this
  *   file's body unchanged apart from stripping annotations).
  *
- * The card reads and writes the `zhipu-toolkit` settings namespace over the
- * `/zhipu-toolkit-settings` connection RPC channel registered by the Host
- * half (see src/settings-rpc.ts), and holds the local API key through the
- * same channel's set-local-key endpoints (stored in the credentials
- * service, never in settings.yaml).
+ * The card reads and writes the `zhipu-toolkit` settings namespace through
+ * `ctx.remote.*` — the official api-gateway remote surface (the same path
+ * the official ui-settings-models plugin uses). The local API key is held
+ * through `remote.credentials` (stored in the credentials service, never in
+ * settings.yaml). There is no custom RPC channel: rc.1 compositions no
+ * longer register plugin channels (the gateway owns the single /api
+ * surface), which is why this half follows the remote contract exactly.
  *
  * UI discipline (see reference/UI_COMPONENTS.md): controls come from
  * @deepseek-ai/dsh-client-ui-primitives — Input for text and password
@@ -33,11 +35,6 @@
 interface ReactModule {
   useState<T>(initial: T): [T, (next: T | ((prev: T) => T)) => void]
   useEffect(effect: () => void | (() => void), deps?: readonly unknown[]): void
-  useSyncExternalStore(
-    subscribe: (onStoreChange: () => void) => () => void,
-    getSnapshot: () => unknown,
-    getServerSnapshot?: () => unknown,
-  ): unknown
   createElement: unknown
 }
 interface JsxRuntimeModule { jsx: (type: unknown, props: unknown, key?: unknown) => unknown }
@@ -56,20 +53,45 @@ interface LocaleService {
   subscribe(fn: () => void): () => void
   getLocale(): { active: string }
 }
-interface ConnectionHandle {
-  rpc: {
-    call(
-      channel: string,
-      endpoint: string,
-      payload: unknown,
-      signal?: AbortSignal,
-    ): Promise<{ ok: true, value: unknown } | { ok: false, error: { code: string, message: string } }>
-  }
+
+/* Structural faces of the api-gateway remote surface ({ok,value|error}).
+ * Shape facts verified against the installed dsh-llm-stepfun card (the
+ * same remote face):
+ * - `settings.describe()` resolves to `{ namespaces: [...] }` — a wrapper
+ *   object, NOT a bare array;
+ * - `credentials.describe(refs)` resolves to a map keyed by reference,
+ *   NOT an array. */
+type RemoteResult<T> = { ok: true, value: T } | { ok: false, error: { code: string, message: string } }
+/** One namespace descriptor out of the settings describe answer. */
+interface SettingsDescriptor {
+  ns: string
+  value: unknown
+  revision?: number
+}
+/** The settings describe answer: a namespaces wrapper, not a bare array. */
+interface SettingsDescribeValue { namespaces?: ReadonlyArray<SettingsDescriptor> }
+/** One credential-describe entry, keyed by reference on the describe answer. */
+interface CredentialEntry { configured: boolean, writable?: boolean }
+/** The credentials describe answer: a map from reference to entry. */
+type CredentialsDescribeValue = Record<string, CredentialEntry>
+interface RemoteCredentials {
+  describe(refs: string[]): Promise<RemoteResult<CredentialsDescribeValue>>
+  set(ref: string, value: string): Promise<RemoteResult<unknown>>
+  unset(ref: string): Promise<RemoteResult<unknown>>
+}
+interface RemoteSettings {
+  describe(): Promise<RemoteResult<SettingsDescribeValue>>
+  mutate(ns: string, ops: unknown, expectedRevision?: number): Promise<RemoteResult<unknown>>
+}
+interface RemoteHandle {
+  credentials: RemoteCredentials
+  settings: RemoteSettings
+  $on?(event: string, handler: () => void): () => void
 }
 interface ClientContext {
   effect(effect: () => (() => void) | void, label?: string): () => void
   locale: LocaleService
-  connection: ConnectionHandle
+  remote: RemoteHandle
   slots: {
     inject(key: string, callback: () => (() => void) | void): () => void
     register(options: Record<string, unknown>, component: unknown): () => void
@@ -123,14 +145,17 @@ __moduleLoader.load({
     const { jsx }: JsxRuntimeModule = require('react/jsx-runtime')
     const primitives: PrimitivesModule = require('@deepseek-ai/dsh-client-ui-primitives')
     // -- constants mirrored from the Host half (single source: src/index.ts) --
-    const SETTINGS_CHANNEL = '/zhipu-toolkit-settings'
     const SETTINGS_NAMESPACE = 'zhipu-toolkit'
+    const LOCAL_API_KEY_REF = 'ZHIPU_TOOLKIT_API_KEY'
     const LOCALE_NS = 'zhipu-toolkit'
     const REASONING_TIERS = ['low', 'medium', 'high', 'xhigh', 'max']
     const ENDPOINT_CHOICES = ['coding', 'paas']
+
     // Official BigModel console deep links: there is no public usage API
     // (probed endpoints all 404), so the console pages are the authoritative
-    // surfaces the card can link to.
+    // surfaces the card links to. Local session-log aggregation was dropped
+    // in the rc.1 rewrite: the remote surface carries no channel for custom
+    // aggregates, and the console remains the source of truth either way.
     const USAGE_URL = 'https://www.bigmodel.cn/coding-plan/personal/usage'
     const RATE_LIMITS_URL = 'https://bigmodel.cn/usercenter/proj-mgmt/rate-limits'
 
@@ -143,7 +168,7 @@ __moduleLoader.load({
     const I18N: Record<'zh' | 'en', Record<string, string>> = {
       zh: {
         title: '智谱工具箱',
-        cardDescription: 'BigModel GLM 双端点模型目录与用量统计',
+        cardDescription: 'BigModel GLM 双端点模型目录与凭据配置',
         collapse: '收起',
         expand: '展开',
         intro: 'BigModel GLM 模型目录：选择计费通道，配置凭据与默认推理档，模型列表实时发现。',
@@ -190,26 +215,11 @@ __moduleLoader.load({
         usageRulesPlan: '套餐限额：5 小时 + 每周双限额，耗尽后等周期恢复、不扣余额；非高峰时段（工作日 14-18 点外）积分消耗 5 折。',
         usageRulesCredits: '积分系数（每万 token）：GLM-5.3=6.9/24、Flash=2.3/8。',
         usageRulesApi: '普通 API 按 token 计费，无场景限制。',
-        usageDisclaimer: '本机 session 日志聚合，非账号权威数据；套餐 5 小时/每周限额以 BigModel 控制台为准。',
-        usageLocalTitle: '本机 BigModel 路由用量（累计）',
-        usageLoading: '正在扫描本机会话日志…',
-        usageScanHint: '首次较慢，取决于会话数量；可先离开此页，扫描在宿主后台进行，已扫描文件不会重复扫描，结果会缓存。',
-        usageScanDone: '已扫描 {files} 个会话文件，耗时 {seconds} 秒',
-        usageEmpty: '本机暂无 GLM 调用记录',
-        usageStatInput: '输入 {n}',
-        usageStatOutput: '输出 {n}',
-        usageCreditsUnit: '积分',
-        usageApprox: '近似系数',
-        window5h: '5 小时',
-        windowToday: '今天',
-        windowWeekly: '本周',
-        window5hNote: '滚动窗口近似，非官方套餐窗口边界',
-        usageEmptyWindow: '该窗口暂无 GLM 调用记录',
-        usageUnparsed: '该窗口无可解析时间戳的记录',
+        usageDisclaimer: '用量数据以 BigModel 官方控制台为准，本卡片仅提供入口。',
       },
       en: {
         title: 'Zhipu Toolkit',
-        cardDescription: 'BigModel GLM dual-endpoint model catalog and usage statistics',
+        cardDescription: 'BigModel GLM dual-endpoint model catalog and credentials',
         collapse: 'Collapse',
         expand: 'Expand',
         intro: 'BigModel GLM model catalog: pick the billing channel, configure credentials and the default reasoning tier, with live model discovery.',
@@ -256,22 +266,7 @@ __moduleLoader.load({
         usageRulesPlan: 'Plan quota: 5-hour + weekly dual limits; exhausted quota restores with the cycle and never touches the balance; credit burn is 50% off off-peak (outside weekday 14:00-18:00).',
         usageRulesCredits: 'Credit factors (per 10k tokens): GLM-5.3=6.9/24, Flash=2.3/8.',
         usageRulesApi: 'The ordinary API bills per token with no scene restriction.',
-        usageDisclaimer: 'Aggregated from local session logs — not authoritative account data; the official BigModel console remains the source for the 5-hour/weekly plan quota.',
-        usageLocalTitle: 'Local BigModel-routed usage (cumulative)',
-        usageLoading: 'Scanning local session logs…',
-        usageScanHint: 'The first scan is slow and depends on how many sessions exist; feel free to leave this page — the scan runs in the host background, already-scanned files are never re-scanned, and results are cached.',
-        usageScanDone: 'Scanned {files} session files in {seconds}s',
-        usageEmpty: 'No local GLM calls on record',
-        usageStatInput: 'in {n}',
-        usageStatOutput: 'out {n}',
-        usageCreditsUnit: 'credits',
-        usageApprox: 'approx factors',
-        window5h: '5h',
-        windowToday: 'Today',
-        windowWeekly: 'This week',
-        window5hNote: 'Rolling window approximation — not the official plan window boundary',
-        usageEmptyWindow: 'No GLM calls in this window',
-        usageUnparsed: 'No records in this window carry a parseable timestamp',
+        usageDisclaimer: 'The official BigModel console is the source of truth for usage and quota; this card only links to it.',
       },
     }
 
@@ -327,20 +322,6 @@ __moduleLoader.load({
       '.zt_usage{display:flex;flex-direction:column;gap:8px;border-top:0.5px solid var(--dsw-alias-border-l2);padding-top:10px}',
       '.zt_usageTitle{margin:0;font-size:12px;line-height:18px;font-weight:500;color:var(--dsw-alias-label-secondary)}',
       '.zt_usageLinks{display:flex;flex-wrap:wrap;gap:8px}',
-      '.zt_usageRows{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}',
-      '.zt_usageCard{display:flex;flex-direction:column;gap:4px;padding:8px 10px;border:0.5px solid var(--dsw-alias-border-l2);border-radius:8px;background:var(--dsw-alias-bg-layer-1);min-width:0}',
-      '.zt_usageModel{font-size:14px;line-height:20px;font-weight:500;color:var(--dsw-alias-label-primary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-      '.zt_usageTag{flex:none;display:inline-flex;align-items:center;height:16px;padding:0 6px;border-radius:4px;background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-tertiary);font-size:10px;line-height:16px}',
-      '.zt_usageCredits{display:flex;align-items:baseline;gap:4px;min-width:0}',
-      '.zt_usageCreditsValue{font-size:20px;line-height:26px;font-weight:600;color:var(--dsw-alias-brand-primary);font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-      '.zt_usageCreditsUnit{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary)}',
-      '.zt_usageLine{font-size:12px;line-height:18px;color:var(--dsw-alias-label-tertiary);font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',
-      '.zt_usageTabs{display:inline-flex;gap:2px;padding:2px;border:0.5px solid var(--dsw-alias-border-l4);border-radius:8px;background:var(--dsw-alias-bg-layer-1);width:fit-content}',
-      '.zt_usageTab{appearance:none;border:0;background:none;font:inherit;font-size:12px;line-height:18px;padding:3px 10px;border-radius:6px;color:var(--dsw-alias-label-secondary);cursor:pointer}',
-      '.zt_usageTab:hover{color:var(--dsw-alias-label-primary)}',
-      '.zt_usageTabActive{background:var(--dsw-alias-brand-primary);color:var(--dsw-alias-bg-layer-1)}',
-      '.zt_usageSlice{display:flex;flex-direction:column;gap:8px}',
-      '.zt_usageScan{display:flex;flex-direction:column;gap:2px}',
       '.zt_disclaimer{margin:0;font-size:12px;line-height:18px;color:var(--dsw-alias-label-dimmed)}',
       '.zt_card{list-style:none;border:0.5px solid var(--dsw-alias-border-l4);border-radius:16px;background:var(--dsw-alias-bg-layer-3);transition:border-color .16s,background .16s}',
       '.zt_card:hover{border-color:var(--dsw-alias-label-dimmed)}',
@@ -369,125 +350,17 @@ __moduleLoader.load({
       }
     }
 
-    /** Snapshot the RPC get endpoint returns. */
+    /** Resolved section snapshot the card works from. */
     interface View { value: Record<string, unknown>, revision: number }
 
-    /** Local-key state the local-key endpoints return. */
+    /** Local-key state derived from the credentials service. */
     interface LocalKeyView { configured: boolean, writable: boolean, masked: string }
 
-    /** One minimal event row of the local usage detail (src/usage-stats.ts shape). */
-    interface UsageEventView {
-      model: string
-      inputTokens: number
-      outputTokens: number
-      time: number | null
-    }
-
-    /** One per-model row of the local usage aggregate (src/usage-stats.ts shape). */
-    interface UsageModelRowView {
-      model: string
-      requests: number
-      inputTokens: number
-      outputTokens: number
-      credits: number
-      approximate: boolean
-    }
-
-    /**
-     * The slice of UsageStatsResult the card renders: events mode carries
-     * the client-sliced detail; aggregated mode carries cumulative rows.
-     */
-    interface UsageView {
-      mode: 'events' | 'aggregated'
-      events: UsageEventView[]
-      models: UsageModelRowView[] | null
-      scannedFiles: number
-      scanMs: number
-    }
-
-    /** Failed/absent scans degrade to this: the block shows its empty state. */
-    const EMPTY_USAGE: UsageView = { mode: 'aggregated', events: [], models: [], scannedFiles: 0, scanMs: 0 }
-
-    /** Credential-ref shape the bridge resolves: letters, digits, underscores. */
+    /** Credential-ref shape the card validates: letters, digits, underscores. */
     const ENV_REF_PATTERN = /^[A-Za-z0-9_]*$/
 
-    /** Compact number forms for the usage rows (stable across locales). */
-    const fmtInt = (value: number): string => Math.round(value).toLocaleString('en-US')
-    const fmtCredits = (value: number): string => (Math.round(value * 10) / 10).toLocaleString('en-US')
-
     /**
-     * Window slicing over the event detail — pure helpers, also exported on
-     * the bundle (`usageView`) so the unit suite drives the shipped code.
-     * K/M/B = 1e3/1e6/1e9 with one decimal; "today"/"week" use the local
-     * midnight and the local Monday midnight as boundaries.
-     */
-    type UsageWindowKind = 'h5' | 'today' | 'week'
-    const usageWindowSince = (kind: UsageWindowKind, now: number): number => {
-      if (kind === 'h5') return now - 5 * 60 * 60 * 1000
-      const day = new Date(now)
-      day.setHours(0, 0, 0, 0)
-      if (kind === 'today') return day.getTime()
-      // Monday-start week: getDay() is Sunday=0, so shift by (day+6)%7.
-      day.setDate(day.getDate() - (day.getDay() + 6) % 7)
-      return day.getTime()
-    }
-    const fmtCompactTokens = (value: number): string => {
-      if (!Number.isFinite(value) || value <= 0) return '0'
-      if (value < 1e3) return String(Math.round(value))
-      if (value < 1e6) return (value / 1e3).toFixed(1) + 'K'
-      if (value < 1e9) return (value / 1e6).toFixed(1) + 'M'
-      return (value / 1e9).toFixed(1) + 'B'
-    }
-    const GLM53_FACTORS = { inputPer10k: 6.9, outputPer10k: 24 }
-    const FLASH_FACTORS = { inputPer10k: 2.3, outputPer10k: 8 }
-    const factorsFor = (model: string): { inputPer10k: number, outputPer10k: number, approximate: boolean } => {
-      const id = model.toLowerCase()
-      if (id.includes('flash')) return { ...FLASH_FACTORS, approximate: false }
-      if (id === 'glm-5.3') return { ...GLM53_FACTORS, approximate: false }
-      return { ...GLM53_FACTORS, approximate: true }
-    }
-    interface UsageSliceRow {
-      model: string
-      requests: number
-      inputTokens: number
-      outputTokens: number
-      credits: number
-      approximate: boolean
-    }
-    /** Slice the event detail into per-model rows for one window. */
-    const sliceUsageEvents = (
-      events: readonly UsageEventView[],
-      kind: UsageWindowKind,
-      now: number,
-    ): { rows: UsageSliceRow[], unparsed: boolean } => {
-      const since = usageWindowSince(kind, now)
-      const rows = new Map<string, UsageSliceRow>()
-      let unparsed = false
-      for (const event of events) {
-        if (event.time === null) {
-          unparsed = true
-          continue
-        }
-        if (event.time < since) continue
-        const factors = factorsFor(event.model)
-        const credits = (event.inputTokens / 10_000) * factors.inputPer10k + (event.outputTokens / 10_000) * factors.outputPer10k
-        const row = rows.get(event.model)
-          ?? { model: event.model, requests: 0, inputTokens: 0, outputTokens: 0, credits: 0, approximate: false }
-        row.requests++
-        row.inputTokens += event.inputTokens
-        row.outputTokens += event.outputTokens
-        row.credits += credits
-        row.approximate = row.approximate || factors.approximate
-        rows.set(event.model, row)
-      }
-      return {
-        rows: [...rows.values()].sort((a, b) => b.credits - a.credits),
-        unparsed,
-      }
-    }
-
-    /**
-     * One text field with a local draft: the write RPC fires on blur/Enter
+     * One text field with a local draft: the write fires on blur/Enter
      * only, never per keystroke (see CLIENT_BUNDLE.md's input lesson).
      */
     function FieldInput(props: {
@@ -556,12 +429,33 @@ __moduleLoader.load({
       ] })
     }
 
-    /** The settings card itself (slot component: receives injected props). */
-    function SettingsCard(props: { connection?: ConnectionHandle }): unknown {
-      const connection = props.connection
+    /** Mask a saved key to its last four characters (never crosses the wire). */
+    const maskTail = (value: string): string => '••••••••' + value.slice(-4)
+
+    /**
+     * Read the namespace's descriptor out of remote.settings.describe() and
+     * project it into the card's view. The remote face returns every
+     * registered namespace, so ours is selected by id; an older host that
+     * does not expose it yields undefined and the card shows its retry state.
+     */
+    function viewFromDescriptors(answer: SettingsDescribeValue): View | undefined {
+      const namespaces = answer.namespaces
+      if (!Array.isArray(namespaces)) return undefined
+      const hit = namespaces.find(entry => entry['ns'] === SETTINGS_NAMESPACE)
+      if (hit === undefined) return undefined
+      const value = hit['value']
+      const revision = hit['revision']
+      if (value === undefined || typeof value !== 'object') return undefined
+      return {
+        value: value as Record<string, unknown>,
+        revision: typeof revision === 'number' ? revision : 0,
+      }
+    }
+
+    /** The settings card itself (slot component: reads ctx.remote.*). */
+    function SettingsCard(): unknown {
       const [view, setView] = react.useState<View | undefined>(undefined)
       const [localKey, setLocalKey] = react.useState<LocalKeyView | undefined>(undefined)
-      const [usage, setUsage] = react.useState<UsageView | undefined>(undefined)
       const [error, setError] = react.useState<string | undefined>(undefined)
       const [readOnly, setReadOnly] = react.useState(false)
       const [saved, setSaved] = react.useState(false)
@@ -571,8 +465,6 @@ __moduleLoader.load({
       // gesture — the Host and the tab have no stake in it (official
       // PluginCard behavior).
       const [open, setOpen] = react.useState(false)
-      // Selected usage window, sliced client-side from the event detail.
-      const [usageWindow, setUsageWindow] = react.useState<'h5' | 'today' | 'week'>('today')
       // Live draft of the local-key input, kept in a ref (no re-render): the
       // explicit check-commit icon reads it without waiting for blur/Enter.
       const keyDraftRef = react.useState<{ current: string | undefined }>({ current: undefined })[0]
@@ -594,128 +486,110 @@ __moduleLoader.load({
           Object.prototype.hasOwnProperty.call(params, name) ? String(params[name]) : match)
       }
 
+      // One mount pass: read the section, read the key state. Reloads re-run
+      // it after a rejected write or a manual retry.
+      react.useEffect(() => installReloadBridge(() => { setReload(n => n + 1) }), [])
       react.useEffect(() => {
-        if (connection === undefined) return
+        const remote = getCtx()?.remote
+        if (remote === undefined) return
         let cancelled = false
         setError(undefined)
-        connection.rpc.call(SETTINGS_CHANNEL, 'get', {})
-          .then(outcome => {
+        void (async () => {
+          try {
+            const outcome = await remote.settings.describe()
             if (cancelled) return
-            if (outcome.ok) {
-              setView(outcome.value as View)
-              setSaved(false)
-            } else {
+            if (!outcome.ok) {
               setError(outcome.error.message)
+              return
             }
-          })
-          .catch((e: unknown) => { if (!cancelled) setError(String(e)) })
-        connection.rpc.call(SETTINGS_CHANNEL, 'local-key', {})
-          .then(outcome => {
-            if (cancelled) return
-            if (outcome.ok) setLocalKey(outcome.value as LocalKeyView)
-          })
-          .catch(() => { /* the key state stays unknown; the field still works */ })
-        // Local usage aggregate: a failed scan — or an older host without
-        // the endpoint — degrades to the empty state, never a stuck spinner.
-        connection.rpc.call(SETTINGS_CHANNEL, 'usage-stats', {})
-          .then(outcome => {
-            if (cancelled) return
-            setUsage(outcome.ok ? outcome.value as UsageView : EMPTY_USAGE)
-          })
-          .catch(() => { if (!cancelled) setUsage(EMPTY_USAGE) })
+            const next = viewFromDescriptors(outcome.value)
+            if (next === undefined) {
+              setError('namespace not registered')
+              return
+            }
+            setView(next)
+            setSaved(false)
+          } catch (e: unknown) {
+            if (!cancelled) setError(String(e))
+          }
+        })()
+        // The key state: read what the credentials service knows, then mask
+        // the stored value locally (the raw key never re-enters the view).
+        // The describe answer is a map keyed by reference, not an array.
+        void (async () => {
+          try {
+            const outcome = await remote.credentials.describe([LOCAL_API_KEY_REF])
+            if (cancelled || !outcome.ok) return
+            const entry = outcome.value?.[LOCAL_API_KEY_REF]
+            if (entry === undefined) return
+            setLocalKey({
+              configured: entry.configured === true,
+              writable: entry.writable !== false,
+              masked: entry.configured === true ? '••••••••' : '',
+            })
+          } catch {
+            /* the key state stays unknown; the field still works */
+          }
+        })()
         return () => { cancelled = true }
-      }, [connection, reload])
+      }, [reload])
 
-      const mutate = (ops: Array<{ op: string, path: string[], value?: unknown }>) => {
-        if (connection === undefined) return
-        connection.rpc.call(SETTINGS_CHANNEL, 'mutate', {
-          ops,
-          ...(view === undefined ? {} : { expectedRevision: view.revision }),
-        })
-          .then(outcome => {
+      /** One settings write: path-addressed ops over the namespace's user section. */
+      const mutate = (ops: Array<{ op: 'set' | 'unset', path: string[], value?: unknown }>) => {
+        const remote = getCtx()?.remote
+        if (remote === undefined || view === undefined) return
+        void (async () => {
+          try {
+            const outcome = await remote.settings.mutate(
+              SETTINGS_NAMESPACE,
+              ops,
+              view.revision,
+            )
             if (outcome.ok) {
-              setView(outcome.value as View)
               setSaved(true)
+              setError(undefined)
+              // Re-read: the committed revision moved, and the next write's
+              // expectedRevision must track it.
+              setReload(n => n + 1)
             } else {
               if (outcome.error.code === 'read-only') setReadOnly(true)
               setError(outcome.error.message)
             }
-          })
-          .catch((e: unknown) => { setError(String(e)) })
+          } catch (e: unknown) {
+            setError(String(e))
+          }
+        })()
       }
 
-      const callLocalKey = (endpoint: 'set-local-key' | 'unset-local-key', payload: unknown) => {
-        if (connection === undefined) return
-        connection.rpc.call(SETTINGS_CHANNEL, endpoint, payload)
-          .then(outcome => {
+      const saveField = (key: string, next: unknown) => {
+        mutate([{ op: 'set', path: [key], value: next }])
+      }
+
+      const callLocalKey = (endpoint: 'set' | 'unset') => {
+        const remote = getCtx()?.remote
+        if (remote === undefined) return
+        void (async () => {
+          try {
+            const draft = keyDraftRef.current
+            const outcome = endpoint === 'unset'
+              ? await remote.credentials.unset(LOCAL_API_KEY_REF)
+              : draft === undefined || draft.trim().length === 0
+                ? undefined
+                : await remote.credentials.set(LOCAL_API_KEY_REF, draft)
+            if (outcome === undefined) return
             if (outcome.ok) {
-              setLocalKey(outcome.value as LocalKeyView)
               setSaved(true)
+              setError(undefined)
+              setEditingKey(false)
+              keyDraftRef.current = undefined
+              setReload(n => n + 1)
             } else {
               setError(outcome.error.message)
             }
-          })
-          .catch((e: unknown) => { setError(String(e)) })
-      }
-
-      // The local usage panel: events mode slices the 5h/today/week windows
-      // client-side from the event detail (null-time events are dropped and
-      // only surface through the unparsed empty state); aggregated mode
-      // (payload cap hit) falls back to cumulative rows without switching.
-      const renderUsageLocal = (): unknown => {
-        if (usage === undefined) {
-          // Loading is honest about the cold scan: it names the wait, says
-          // leaving the page is safe, and notes the host keeps scanning in
-          // the background (already-scanned files are never redone).
-          return jsx('div', { className: 'zt_usageScan', children: [
-            jsx('p', { className: 'zt_hint', children: t('usageLoading') }),
-            jsx('p', { className: 'zt_hint', children: t('usageScanHint') }),
-          ] })
-        }
-        const usageCard = (row: { model: string, inputTokens: number, outputTokens: number, credits: number, approximate: boolean }): unknown =>
-          jsx('div', { className: 'zt_usageCard', key: row.model, children: [
-            jsx('div', { className: 'zt_usageModel', children: row.model }),
-            jsx('div', { className: 'zt_usageCredits', children: [
-              jsx('span', { className: 'zt_usageCreditsValue', children: (row.approximate ? '≈' : '') + fmtCredits(row.credits) }),
-              jsx('span', { className: 'zt_usageCreditsUnit', children: t('usageCreditsUnit') }),
-              row.approximate ? jsx('span', { className: 'zt_usageTag', children: t('usageApprox') }) : null,
-            ] }),
-            jsx('div', { className: 'zt_usageLine', children:
-              `${t('usageStatInput', { n: fmtCompactTokens(row.inputTokens) })} · ${t('usageStatOutput', { n: fmtCompactTokens(row.outputTokens) })}` }),
-          ] })
-        // Real scan telemetry: grounds the user's expectation for the next
-        // cold scan instead of a promised duration.
-        const scanDone = jsx('p', { className: 'zt_disclaimer', children: t('usageScanDone', {
-          files: fmtInt(usage.scannedFiles),
-          seconds: (usage.scanMs / 1000).toFixed(1),
-        }) })
-        if (usage.mode === 'aggregated') {
-          const rows = usage.models ?? []
-          return jsx('div', { className: 'zt_usageSlice', children: [
-            rows.length === 0
-              ? jsx('p', { className: 'zt_hint', children: t('usageEmpty') })
-              : jsx('div', { className: 'zt_usageRows', children: rows.map(row => usageCard(row)) }),
-            scanDone,
-          ] })
-        }
-        const sliced = sliceUsageEvents(usage.events, usageWindow, Date.now())
-        return jsx('div', { className: 'zt_usageSlice', children: [
-          jsx('div', { className: 'zt_usageTabs', role: 'group', 'aria-label': t('usageLocalTitle'), children:
-            (['h5', 'today', 'week'] as const).map(kind => jsx('button', {
-              type: 'button',
-              key: kind,
-              className: usageWindow === kind ? 'zt_usageTab zt_usageTabActive' : 'zt_usageTab',
-              'aria-pressed': usageWindow === kind ? 'true' : 'false',
-              onClick: () => { setUsageWindow(kind) },
-              children: t(kind === 'h5' ? 'window5h' : kind === 'today' ? 'windowToday' : 'windowWeekly'),
-            })),
-          }),
-          usageWindow === 'h5' ? jsx('p', { className: 'zt_hint', children: t('window5hNote') }) : null,
-          sliced.rows.length === 0
-            ? jsx('p', { className: 'zt_hint', children: sliced.unparsed ? t('usageUnparsed') : t('usageEmptyWindow') })
-            : jsx('div', { className: 'zt_usageRows', children: sliced.rows.map(row => usageCard(row)) }),
-          scanDone,
-        ] })
+          } catch (e: unknown) {
+            setError(String(e))
+          }
+        })()
       }
 
       // The card shell mirrors the official PluginCard: an <li> (the tab's
@@ -746,11 +620,6 @@ __moduleLoader.load({
         ],
       })
 
-      if (connection === undefined) {
-        return shell(jsx('div', { className: 'zt_section', children: [
-          jsx('p', { className: 'zt_notice', children: t('unloading') }),
-        ] }))
-      }
       if (view === undefined) {
         return shell(jsx('div', { className: 'zt_section', children: [
           error === undefined
@@ -765,10 +634,6 @@ __moduleLoader.load({
       }
 
       const value = view.value
-      const disabled = false
-      const saveField = (key: string, next: unknown) => {
-        mutate([{ op: 'set', path: [key], value: next }])
-      }
       const endpoints = String(value.endpoints ?? 'coding')
       const useLocal = value.useLocalApiKey === true
 
@@ -783,7 +648,6 @@ __moduleLoader.load({
             jsx('span', { className: 'zt_fieldLabel', children: t('endpointsLabel') }),
             jsx(FieldSelect, {
               value: ENDPOINT_CHOICES.includes(endpoints) ? endpoints : 'coding',
-              disabled,
               label: t('endpointsLabel'),
               options: [
                 { id: 'coding', text: t('endpointsCoding') },
@@ -826,7 +690,6 @@ __moduleLoader.load({
                   jsx('div', { className: 'zt_inputWrap', children:
                     jsx(FieldInput, {
                       value: '',
-                      disabled,
                       label: t('localApiKeyLabel'),
                       placeholder: t('localApiKeyPlaceholder'),
                       type: 'password',
@@ -835,7 +698,8 @@ __moduleLoader.load({
                         // An empty commit keeps the saved key untouched;
                         // a non-empty value overwrites it in place.
                         if (next.trim().length > 0) {
-                          callLocalKey('set-local-key', { value: next })
+                          keyDraftRef.current = next
+                          callLocalKey('set')
                           setEditingKey(false)
                         }
                       },
@@ -845,16 +709,7 @@ __moduleLoader.load({
                     className: 'zt_iconBtn',
                     'aria-label': t('saveHint'),
                     title: t('saveHint'),
-                    onClick: () => {
-                      // Explicit submit: same guard as blur/Enter — an empty
-                      // draft leaves the saved key untouched.
-                      const draft = keyDraftRef.current
-                      if (draft !== undefined && draft.trim().length > 0) {
-                        callLocalKey('set-local-key', { value: draft })
-                        keyDraftRef.current = undefined
-                        setEditingKey(false)
-                      }
-                    },
+                    onClick: () => { callLocalKey('set') },
                     children: jsx(primitives.IconCheckOutline16, {}),
                   }),
                   localKey?.configured === true ? jsx('button', {
@@ -862,11 +717,7 @@ __moduleLoader.load({
                     className: 'zt_iconBtn',
                     'aria-label': t('clear'),
                     title: t('clear'),
-                    onClick: () => {
-                      keyDraftRef.current = undefined
-                      callLocalKey('unset-local-key', {})
-                      setEditingKey(false)
-                    },
+                    onClick: () => { callLocalKey('unset') },
                     children: jsx(primitives.IconCloseOutline16, {}),
                   }) : null,
                 ] })
@@ -888,7 +739,7 @@ __moduleLoader.load({
                     className: 'zt_iconBtn',
                     'aria-label': t('clear'),
                     title: t('clear'),
-                    onClick: () => { callLocalKey('unset-local-key', {}) },
+                    onClick: () => { callLocalKey('unset') },
                     children: jsx(primitives.IconCloseOutline16, {}),
                   }),
                 ] }),
@@ -904,7 +755,6 @@ __moduleLoader.load({
               value: REASONING_TIERS.includes(String(value.defaultReasoningTier ?? 'low'))
                 ? String(value.defaultReasoningTier)
                 : 'low',
-              disabled,
               label: t('reasoningLabel'),
               options: REASONING_TIERS.map(id => ({ id, text: id })),
               onChange: (next: string) => { saveField('defaultReasoningTier', next) },
@@ -918,7 +768,6 @@ __moduleLoader.load({
             jsx('span', { className: 'zt_fieldLabel', children: t('displayNameLabel') }),
             jsx(FieldInput, {
               value: value.displayName,
-              disabled,
               label: t('displayNameLabel'),
               placeholder: 'BigModel',
               onCommit: (next: string) => { saveField('displayName', next) },
@@ -932,7 +781,6 @@ __moduleLoader.load({
                 jsx('span', { className: 'zt_fieldLabel', children: t('paasKeyLabel') }),
                 jsx(FieldInput, {
                   value: value.paasApiKeyEnv,
-                  disabled,
                   label: t('paasKeyLabel'),
                   placeholder: 'ZHIPU_API_KEY',
                   pattern: ENV_REF_PATTERN,
@@ -944,7 +792,6 @@ __moduleLoader.load({
                 jsx('span', { className: 'zt_fieldLabel', children: t('codingKeyLabel') }),
                 jsx(FieldInput, {
                   value: value.codingApiKeyEnv,
-                  disabled,
                   label: t('codingKeyLabel'),
                   placeholder: 'BIGMODEL_API_KEY',
                   pattern: ENV_REF_PATTERN,
@@ -965,7 +812,6 @@ __moduleLoader.load({
               jsx('span', { className: 'zt_fieldLabel', children: t('codingBaseLabel') }),
               jsx(FieldInput, {
                 value: value.codingBaseURL,
-                disabled,
                 label: t('codingBaseLabel'),
                 placeholder: 'https://open.bigmodel.cn/api/coding/paas/v4',
                 onCommit: (next: string) => { saveField('codingBaseURL', next) },
@@ -975,7 +821,6 @@ __moduleLoader.load({
               jsx('span', { className: 'zt_fieldLabel', children: t('paasBaseLabel') }),
               jsx(FieldInput, {
                 value: value.paasBaseURL,
-                disabled,
                 label: t('paasBaseLabel'),
                 placeholder: 'https://open.bigmodel.cn/api/paas/v4',
                 onCommit: (next: string) => { saveField('paasBaseURL', next) },
@@ -987,7 +832,8 @@ __moduleLoader.load({
         // (probed candidates all 404), so the console pages are the
         // authoritative surfaces — the card deep-links to them with the
         // official Button/Icon pair and restates the billing rules as
-        // static copy. Data disclaimers live in usageDisclaimer.
+        // static copy. The discontinued local session-log aggregate left
+        // its data-disclaimer note in usageDisclaimer.
         jsx('div', { className: 'zt_usage', children: [
           jsx('p', { className: 'zt_usageTitle', children: t('usageQuotaTitle') }),
           jsx('div', { className: 'zt_usageLinks', children: [
@@ -1006,9 +852,6 @@ __moduleLoader.load({
               children: t('limitsLink'),
             }),
           ] }),
-          // Local aggregate from the session logs (read-only `usage-stats`
-          // endpoint, 60s host-side cache, data never leaves the machine).
-          renderUsageLocal(),
           jsx('p', { className: 'zt_hint', children: t('usageRulesPlan') }),
           jsx('p', { className: 'zt_hint', children: t('usageRulesCredits') }),
           jsx('p', { className: 'zt_hint', children: t('usageRulesApi') }),
@@ -1023,12 +866,18 @@ __moduleLoader.load({
       ] }))
     }
 
-    /** Client-side services required before the card can mount. */
-    const inject = ['slots', 'connection', 'locale']
+    /**
+     * Client-side services required before the card can mount. `remote` and
+     * its namespaces are provided by api-gateway/connection, not by this
+     * plugin: without the declaration cordis resolves them to undefined and
+     * the card would silently never load (the exact failure that retired
+     * the custom-channel half in the rc.1 upgrade).
+     */
+    const inject = ['slots', 'connection', 'locale', 'remote', 'remote.credentials', 'remote.settings']
 
-    // The client root context, set by apply(): the card reads the locale
-    // service through this accessor rather than a prop (label + copy both
-    // follow it; the slot's inject factory supplies only the connection).
+    // The client root context, set by apply(): the card reads the locale and
+    // remote services through this accessor rather than a prop (label + copy
+    // both follow it; the slot's registration supplies no props).
     let ctxRef: ClientContext | undefined
     function getCtx(): ClientContext | undefined { return ctxRef }
 
@@ -1050,19 +899,41 @@ __moduleLoader.load({
         key: SETTINGS_NAMESPACE,
         order: 30,
         locale: LOCALE_NS,
-        inject: () => ({ connection: ctx.connection }),
       }, SettingsCard))
+      // Pushed invalidations keep the card honest when the Host, another
+      // card, or a CLI write moves the section or the stored key. The card's
+      // own reload counter is the bridge: a shared module-scoped setter the
+      // SettingsCard installs on mount.
+      ctx.effect(() => {
+        const disposers: Array<() => void> = []
+        const remote = ctx.remote
+        if (remote !== undefined && remote.$on !== undefined) {
+          for (const event of ['settings/document-updated', 'credentials/reference-updated']) {
+            try {
+              const dispose = remote.$on(event, () => { bumpReload() })
+              if (typeof dispose === 'function') disposers.push(dispose)
+            } catch {
+              // A host without the pushed-event face simply never refreshes;
+              // the card stays correct on the next mount.
+            }
+          }
+        }
+        return () => {
+          for (const dispose of disposers) dispose()
+        }
+      }, 'dsh-zhipu-toolkit: pushed invalidations')
+    }
+
+    // Reload bridge: the card installs its counter's setter on mount, and the
+    // pushed-invalidation effect (registered without card props) calls it.
+    let bumpReload: () => void = () => {}
+    function installReloadBridge(setter: () => void): () => void {
+      bumpReload = setter
+      return () => { bumpReload = () => {} }
     }
 
     bundleModule.exports.apply = apply
     bundleModule.exports.inject = inject
-    // Pure usage-view helpers, exported so the unit suite drives the exact
-    // shipped slicing/formatting code (no reimplementation drift).
-    bundleModule.exports.usageView = {
-      windowSince: usageWindowSince,
-      fmtCompactTokens,
-      sliceUsageEvents,
-    }
     return bundleModule.exports
   },
 })

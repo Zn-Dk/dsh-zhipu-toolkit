@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-09-24
+
+### 变更 / Changed（破坏性，适配 DSH 0.1.5-rc.1）
+
+- **Client 半迁移到官方 Remote 架构**：设置卡片不再经自建 `connection.rpc` 通道（`/zhipu-toolkit-settings`）与 Host 通信，改走 api-gateway 暴露的 `ctx.remote.settings` / `ctx.remote.credentials`（`/api` 单通道）。自建通道在 rc.1 下每个调用都会落到静态资源 fallback 返回 HTTP 405（`transport failure …: HTTP 405`），根因是插件 ctx 未声明 `webServer` 服务时 cordis reflect proxy 抛错、异常被 effect runner 静默吞掉。`dsh.client.inject` 增加 `@deepseek-ai/dsh-api-remotes`，卡片依赖声明补齐 `remote` / `remote.credentials` / `remote.settings`。
+- **读取形状修正**：`settings.describe()` 的 value 是 `{ namespaces: [...] }` 包装对象（不是裸数组）、`credentials.describe()` 的 value 是按引用键控的 map（不是数组）——已按官方 `dsh-llm-stepfun` 同款写法修正，并写进测试断言防回归。
+- **修复 provider 调用即崩**：`ResolvedPiAiProviderProfile` 在 rc.1 新增必需字段 `modelErrors`（`llm-pi-ai` adapter 无守卫消费 `profile.modelErrors.get(model)`），本插件构造 profile 时补 `modelErrors: new Map()`（自建模型目录，无 per-model 失败可申报）。修复前症状：Models 页能列出 BigModel，一选模型调用就 `Cannot read properties of undefined (reading 'get')`。
+- **移除本机用量统计面板**（`usage-stats`）：`ctx.remote.*` 架构下没有自定义聚合数据的通道，且官方 console 才是权威来源。原「用量与额度」区块保留两个官方 console 深链（Coding Plan 用量统计、速率限制）+ 静态计费规则说明 + 「以官方控制台为准」的免责说明。
+- **删除 `settings-rpc.ts`**（206 行 RPC 桥）与 `usage-stats.ts`（490 行会话日志聚合）及其单测；Host 半 `settings.installSection`、双端点路由、实时模型发现、本地 key 模式**均无改动**。
+
+### 迁移提示 / Migration
+
+- 依赖 DSH **≥ 0.1.5-rc.1**（0.1.2 及更早版本的自建通道已不可用）。
+- settings namespace `zhipu-toolkit` 与既有配置**完全兼容**，`~/.dsh/settings.yaml` 无需改动；凭据引用、本地 API key、Base URL、推理档原样保留。
+
 ## [0.2.1] - 2026-09-09
 
 ### 变更 / Changed

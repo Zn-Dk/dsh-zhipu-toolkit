@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import * as Built from '../lib/index.js'
 import * as BuiltInvariant from '../lib/invariant.js'
-import * as BuiltSettingsRpc from '../lib/settings-rpc.js'
 
 /**
  * Verifies the BUILT artifact (lib/), not the sources: the tsc output must
@@ -56,46 +55,13 @@ describe('built host artifact', () => {
     })
   })
 
-  it('exposes the settings bridge constants the client card targets', () => {
+  it('exposes the settings constants the client card targets', () => {
     expect(Built.SETTINGS_NAMESPACE).toBe('zhipu-toolkit')
-    // The connection channel pattern rejects inner slashes and requires a
-    // leading one; the dash form is the only valid spelling.
-    expect(Built.SETTINGS_CHANNEL).toBe('/zhipu-toolkit-settings')
     expect(Built.REASONING_TIERS).toEqual(['low', 'medium', 'high', 'xhigh', 'max'])
-    expect(Built.MUTABLE_FIELDS).toEqual([
-      'endpoints',
-      'codingApiKeyEnv',
-      'paasApiKeyEnv',
-      'codingBaseURL',
-      'paasBaseURL',
-      'displayName',
-      'defaultReasoningTier',
-      'useLocalApiKey',
-    ])
-    expect(typeof BuiltSettingsRpc.createSettingsRpcHandler).toBe('function')
   })
 
   it('exposes the local API key reference for the local-key mode', () => {
     expect(Built.LOCAL_API_KEY_REF).toBe('ZHIPU_TOOLKIT_API_KEY')
-  })
-
-  it('exposes the local usage statistics surface after compilation', () => {
-    expect(typeof Built.computeUsageStats).toBe('function')
-    expect(typeof Built.defaultSessionsDir).toBe('function')
-    expect(typeof Built.resetUsageStatsCache).toBe('function')
-    expect(Built.GLM53_CREDIT_FACTORS).toEqual({ inputPer10k: 6.9, outputPer10k: 24 })
-    expect(Built.FLASH_CREDIT_FACTORS).toEqual({ inputPer10k: 2.3, outputPer10k: 8 })
-    expect(Built.creditFactorsFor('glm-5.3')).toEqual({
-      factors: { inputPer10k: 6.9, outputPer10k: 24 }, approximate: false,
-    })
-    expect(Built.creditFactorsFor('glm-5.3-flash')).toEqual({
-      factors: { inputPer10k: 2.3, outputPer10k: 8 }, approximate: false,
-    })
-    expect(Built.creditFactorsFor('glm-4.7').approximate).toBe(true)
-    // The host fire-and-forget pre-scan runs on apply, so the card usually
-    // reads a warm cache instead of waiting on a cold ~30s scan.
-    const hostIndex = readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8')
-    expect(hostIndex).toContain('computeUsageStats().catch')
   })
 })
 
@@ -152,26 +118,28 @@ describe('built client bundle', () => {
     expect(bundle).toContain("t('cardDescription')")
     // The aria label composes the state-dependent key at render time.
     expect(bundle).toContain("t(open ? 'collapse' : 'expand')")
-    expect(bundle).toContain('BigModel GLM 双端点模型目录与用量统计')
+    expect(bundle).toContain('BigModel GLM 双端点模型目录与凭据配置')
   })
 
-  it('declares the client-side service injections and the RPC channel', () => {
-    expect(bundle).toContain("const inject = ['slots', 'connection', 'locale']")
-    expect(bundle).toContain("'/zhipu-toolkit-settings'")
+  it('declares the client-side service injections including the remote surface', () => {
+    // The official remote contract: connection carries it, api-gateway
+    // provides it. Declaring each namespace is mandatory — an undeclared one
+    // resolves to undefined and the card never loads.
+    expect(bundle).toContain("'remote'")
+    expect(bundle).toContain("'remote.credentials'")
+    expect(bundle).toContain("'remote.settings'")
     expect(bundle).toContain("'zhipu-toolkit'")
   })
 
-  it('carries the endpoint choice, billing help, and local-key endpoints', () => {
+  it('carries the endpoint choice, billing help, and the local-key reference', () => {
     // Endpoint choice is one of exactly two billing channels.
     expect(bundle).toContain("const ENDPOINT_CHOICES = ['coding', 'paas']")
     expect(bundle).not.toContain("'both'")
     // Billing help copy keys for both channels.
     expect(bundle).toContain('endpointHelpCoding')
     expect(bundle).toContain('endpointHelpPaas')
-    // Local-key mode endpoints on the RPC channel.
-    expect(bundle).toContain("'set-local-key'")
-    expect(bundle).toContain("'unset-local-key'")
-    expect(bundle).toContain("'local-key'")
+    // Local-key mode writes through the credentials remote, not settings.
+    expect(bundle).toContain('const LOCAL_API_KEY_REF')
     expect(bundle).toContain('ZHIPU_TOOLKIT_API_KEY')
     // The card title follows the plugin name.
     expect(bundle).toContain('Zhipu Toolkit')
@@ -201,9 +169,10 @@ describe('built client bundle', () => {
     // The live draft rides a ref so the check icon can submit without blur.
     expect(bundle).toContain('keyDraftRef')
     expect(bundle).toContain('onDraftChange')
-    // The check icon submits through the same empty-guard as blur/Enter.
+    // The check icon submits through the same empty-guard as blur/Enter:
+    // an absent or blank draft never reaches the credentials write.
     expect(bundle).toMatch(/const draft = keyDraftRef\.current/)
-    expect(bundle).toMatch(/draft !== undefined && draft\.trim\(\)\.length > 0/)
+    expect(bundle).toMatch(/draft === undefined \|\| draft\.trim\(\)\.length === 0/)
     // The check icon's own aria/title label key exists in both languages.
     expect(bundle).toContain('saveHint')
     expect(bundle).toContain('t(\'saveHint\')')
@@ -237,58 +206,20 @@ describe('built client bundle', () => {
     expect(bundle).toContain('Usage & quota')
   })
 
-  it('carries the local usage aggregate panel over the usage-stats endpoint', () => {
-    // The read-only RPC endpoint and its client call site.
-    expect(bundle).toContain("'usage-stats'")
-    expect(bundle).toContain("call(SETTINGS_CHANNEL, 'usage-stats'")
-    // The panel keys ride along in the shipped bundle (zh/en).
-    for (const key of [
-      'usageLocalTitle',
-      'usageLoading',
-      'usageScanHint',
-      'usageEmpty',
-      'usageStatInput',
-      'usageStatOutput',
-      'usageCreditsUnit',
-      'usageApprox',
-      'window5h',
-      'windowToday',
-      'windowWeekly',
-      'window5hNote',
-      'usageEmptyWindow',
-      'usageUnparsed',
-    ]) {
-      expect(bundle).toContain(key)
-    }
-    // The loading state is honest about the cold scan: no promised
-    // duration, leaving the page is safe, the host keeps scanning in the
-    // background without redoing scanned files, and results are cached.
-    expect(bundle).toContain('正在扫描本机会话日志…')
-    expect(bundle).toContain('首次较慢，取决于会话数量')
-    expect(bundle).toContain('已扫描文件不会重复扫描')
-    expect(bundle).toContain('结果会缓存')
-    // Real scan telemetry grounds the expectation for the next cold scan.
-    expect(bundle).toContain('usageScanDone')
-    expect(bundle).toContain('scanMs')
-    // The zh panel title and the empty states are both present.
-    expect(bundle).toContain('本机 BigModel 路由用量（累计）')
-    expect(bundle).toContain('本机暂无 GLM 调用记录')
-    expect(bundle).toContain('No local GLM calls on record')
-    expect(bundle).toContain('该窗口暂无 GLM 调用记录')
-    // Window switcher (5h/today/week) + the rolling-window note.
-    expect(bundle).toContain('zt_usageTabs')
-    expect(bundle).toContain('zt_usageTabActive')
-    expect(bundle).toContain('滚动窗口近似，非官方套餐窗口边界')
-    // Per-model stat cards: tabular numerals + the approx-factor tag.
-    expect(bundle).toContain('zt_usageCard')
-    expect(bundle).toContain('tabular-nums')
-    expect(bundle).toContain('zt_usageTag')
-    // Events-vs-aggregated payload modes + the pure helper export the unit
-    // suite drives.
-    expect(bundle).toContain("=== 'aggregated'")
-    expect(bundle).toContain('sliceUsageEvents')
-    expect(bundle).toContain('usageView')
-    // The degrade-to-empty sentinel guards against a stuck spinner.
-    expect(bundle).toContain('EMPTY_USAGE')
+  it('reads and writes through the remote surface with no custom channel', () => {
+    // rc.1 retired plugin-owned RPC channels: the gateway owns the single
+    // /api surface, and the card uses the official remote face instead.
+    expect(bundle).toContain('remote.settings.describe()')
+    expect(bundle).toContain('remote.settings.mutate(')
+    expect(bundle).toContain('remote.credentials.describe([LOCAL_API_KEY_REF])')
+    expect(bundle).toContain('remote.credentials.set(LOCAL_API_KEY_REF, draft)')
+    expect(bundle).toContain('remote.credentials.unset(LOCAL_API_KEY_REF)')
+    // Shape contract (the live failure this pins down): describe answers are
+    // a `{ namespaces }` wrapper / a ref-keyed map — never bare arrays.
+    expect(bundle).toContain('answer.namespaces')
+    expect(bundle).toMatch(/outcome\.value\?\.\[LOCAL_API_KEY_REF\]/)
+    // The named connect channel is gone from the shipped bundle.
+    expect(bundle).not.toContain('zhipu-toolkit-settings')
+    expect(bundle).not.toContain('usage-stats')
   })
 })

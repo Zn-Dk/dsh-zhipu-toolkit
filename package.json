@@ -1,7 +1,7 @@
 {
   "name": "dsh-zhipu-toolkit",
   "description": "Zhipu BigModel/GLM provider toolkit for DeepSeek Harness: dual-endpoint model catalog (Coding Plan + ordinary API), verified thinking-level mapping, live model discovery",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -26,10 +26,6 @@
       "types": "./lib/config.d.ts",
       "default": "./lib/config.js"
     },
-    "./settings-rpc": {
-      "types": "./lib/settings-rpc.d.ts",
-      "default": "./lib/settings-rpc.js"
-    },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
@@ -39,13 +35,11 @@
     "lib/client.js",
     "lib/catalog.js",
     "lib/config.js",
-    "lib/settings-rpc.js",
     "lib/index.d.ts",
     "lib/invariant.d.ts",
     "lib/client.d.ts",
     "lib/catalog.d.ts",
     "lib/config.d.ts",
-    "lib/settings-rpc.d.ts",
     "cordis.patch.yml",
     "README.md",
     "README.zh.md",
@@ -70,12 +64,17 @@
         "@deepseek-ai/dsh-client-connection",
         "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-renderer",
-        "@deepseek-ai/dsh-client-ui-settings"
+        "@deepseek-ai/dsh-client-ui-settings-plugins",
+        "@deepseek-ai/dsh-api-remotes"
       ],
       "platform": "web"
     }
   },
   "license": "MIT",
+  "engines": {
+    "node": ">=20",
+    "dsh": ">=0.1.5-rc.1"
+  },
   "devDependencies": {
     "typescript": "^5.9.2",
     "vitest": "^3.2.4",

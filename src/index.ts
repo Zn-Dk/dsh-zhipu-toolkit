@@ -31,13 +31,8 @@ import type { ResolvedPiAiProviderProfile } from '@deepseek-ai/dsh-llm-pi-ai'
 // dsh-settings Service Definition declares it); the runtime service is
 // provided by the host composition.
 import type {} from '@deepseek-ai/dsh-settings'
-// Type-only: pulls the ctx.connection Context merge (the Host connection
-// handle that rpc.handle registers channels on).
-import type {} from '@deepseek-ai/dsh-client-connection'
 import { discoverModels, maintainedModels } from './catalog.ts'
 import { Config, LOCAL_API_KEY_REF, resolveConfig, type Config as ConfigType, type ResolvedConfig } from './config.ts'
-import { createSettingsRpcHandler, type CredentialsFace, type SettingsProviderFace } from './settings-rpc.ts'
-import { computeUsageStats } from './usage-stats.ts'
 
 export const name = 'dsh-zhipu-toolkit'
 export const inject = ['llm', 'credentials']
@@ -66,26 +61,9 @@ export type {
   Endpoints, ReasoningTier, ResolvedConfig as ResolvedConfigType, ResolvedEndpoint,
 } from './config.ts'
 export { REASONING_TIERS } from './config.ts'
-export { createSettingsRpcHandler, MUTABLE_FIELDS } from './settings-rpc.ts'
-export type { RpcResult, SettingsPathOp, SettingsProviderFace, SettingsView } from './settings-rpc.ts'
-export {
-  computeUsageStats,
-  creditFactorsFor,
-  defaultSessionsDir,
-  EVENTS_CAP,
-  FLASH_CREDIT_FACTORS,
-  GLM53_CREDIT_FACTORS,
-  resetUsageStatsCache,
-} from './usage-stats.ts'
-export type {
-  UsageCreditFactors, UsageEventRow, UsageModelRow, UsageStatsMode, UsageStatsResult, UsageWindowStats,
-} from './usage-stats.ts'
 
 /** Settings namespace owned by this plugin (lowercase kebab-case). */
 export const SETTINGS_NAMESPACE = 'zhipu-toolkit'
-
-/** Connection RPC channel serving the settings card (see CHANNEL_PATTERN: no inner slashes). */
-export const SETTINGS_CHANNEL = '/zhipu-toolkit-settings'
 
 /** The default reasoning tier applied to effort-undefined requests. */
 export const DEFAULT_REASONING_TIER = 'low' as const
@@ -129,6 +107,10 @@ function profilesFor(
       requestImageMaxBytes: config.requestImageMaxBytes,
       retryPolicy: resolveRetryPolicy(undefined, 'dsh-zhipu-toolkit: retryPolicy'),
       configuredMaxTokens: new Map<string, number>(),
+      // rc.1 (0.1.5) added this required field: per-model catalog failures the
+      // adapter reports before a request. This plugin builds every model itself
+      // from its own catalog, so it has no per-model failures to declare.
+      modelErrors: new Map<string, string>(),
       piProvider: providerFor(endpoint, models),
     }
     // This package pins pi-ai 0.82.1 (the version whose builtin GLM catalog
@@ -279,64 +261,5 @@ export function apply(ctx: Context, rawConfig: ConfigType): void {
         },
       },
     )
-    // Serve the same section to the Web settings card over the settings
-    // provider seam (get/mutate with revisions, the same face the official
-    // settings surfaces use). The connection envelope carries
-    // {code, message, details} failures; the bridge's own result shape maps
-    // straight onto it. The credentials face lets the card write the local
-    // API key into the credentials store (never into settings.yaml) and read
-    // back only its configured state plus a masked summary.
-    settingsCtx.inject(['connection'], (webCtx) => {
-      const connection = webCtx.connection
-      if (connection === undefined) return
-      const credentialsFace: CredentialsFace = {
-        set: (ref, value) => webCtx.credentials.set(credentialRef(ref), value),
-        unset: (ref) => webCtx.credentials.unset(credentialRef(ref)),
-        describe: async (ref) => {
-          const info = await webCtx.credentials.describe(credentialRef(ref))
-          return { configured: info.configured, writable: info.writable }
-        },
-        masked: async (ref) => {
-          const hit = await webCtx.credentials.resolve(credentialRef(ref))
-          if (hit === undefined) return undefined
-          const tail = hit.value.slice(-4)
-          return '••••••••' + tail
-        },
-      }
-      const handler = createSettingsRpcHandler(
-        webCtx.settings as unknown as SettingsProviderFace,
-        SETTINGS_NAMESPACE,
-        credentialsFace,
-        undefined,
-        // Read-only local usage aggregate (60s cached, never leaves the host).
-        () => computeUsageStats(),
-      )
-      webCtx.effect(() => connection.rpc.handle(
-        SETTINGS_CHANNEL,
-        async (endpoint: string, payload: unknown) => {
-          const outcome = await handler(endpoint, payload)
-          return outcome.ok
-            ? { ok: true, value: outcome.value } as const
-            : {
-              ok: false,
-              error: { code: outcome.error.code, message: outcome.error.message, details: {} },
-            } as const
-        },
-      ), 'dsh-zhipu-toolkit: settings RPC channel')
-    })
-
-    // Fire-and-forget usage pre-scan: by the time the user opens the
-    // settings card the 60s-cached, incrementally-built aggregate is
-    // usually ready, so the panel reads instantly instead of waiting on a
-    // cold ~30s scan. Failures stay silent — the card degrades to its
-    // loading/empty state and the next RPC attempt retries anyway.
-  // Deferred prescan: warming the usage cache is pure host-side bookkeeping and
-  // must not compete with boot-critical work (plugin assembly, tsx transpile).
-  // 60s settle delay keeps the event loop responsive during startup; the scan
-  // itself stays fire-and-forget with silent failure and incremental caching.
-  const prescanTimer = setTimeout(() => {
-    void computeUsageStats().catch(() => undefined)
-  }, 60_000)
-  ctx.effect(() => () => clearTimeout(prescanTimer), 'model-catalog-bigmodel: usage prescan timer')
   })
 }
