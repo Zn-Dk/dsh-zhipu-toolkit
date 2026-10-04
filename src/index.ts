@@ -24,7 +24,7 @@ import {
 import { zaiProvider } from '@earendil-works/pi-ai/providers/zai'
 import type { Context } from '@deepseek-ai/cordis'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
-import { assertUsableApiKey, LlmError, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
+import { assertUsableApiKey, LlmError, resolveImageAttachmentAccess, resolveRetryPolicy } from '@deepseek-ai/dsh-llm'
 import { PiAiAdapter } from '@deepseek-ai/dsh-llm-pi-ai'
 import type { ResolvedPiAiProviderProfile } from '@deepseek-ai/dsh-llm-pi-ai'
 // Type-only: pulls the ctx.settings Context merge into this program (the
@@ -181,6 +181,16 @@ export function apply(ctx: Context, rawConfig: ConfigType): void {
       credentials: new InMemoryCredentialStore(),
       authContext: defaultProviderAuthContext(),
     },
+    // Durable image delivery, mirroring the llm-pi-ai host plugin: the
+    // adapter asks the deployment attachment store for request-image
+    // versions (base64 inline on this route) whenever a turn carries an
+    // image block. Without a store the adapter keeps text-only behavior.
+    resolveAttachments: () => ctx.get('attachments'),
+    resolveImageAccess: (attachments, ref) => resolveImageAttachmentAccess(
+      attachments,
+      (hostPath) => ctx.get('fs')?.processPathFromHostPath(hostPath),
+      ref,
+    ),
   })
   const registration = ctx.llm.registerAdapter(routes(), adapter)
   const controller = new AbortController()
